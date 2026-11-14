@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Breadboard Odyssey</title>
+<link rel="stylesheet" href="css/app.css">
+<header>
+  <i aria-hidden="true">⌁</i>
+  <div>
+    <h1>Breadboard Odyssey</h1>
+    <p>Build → Investigate → Repair → Verify · 555 timer diagnostic loop</p>
+  </div>
+  <nav class="journey-bar" aria-label="Journey stages">
+    <button type="button" id="stage-build" class="active">1 Build</button>
+    <button type="button" id="stage-investigate">2 Investigate</button>
+    <button type="button" id="stage-repair">3 Repair</button>
+    <button type="button" id="stage-verify">4 Verify</button>
+  </nav>
+</header>
+<main>
+  <aside>
+    <section>
+      <h2>Coach</h2>
+      <div id="coach" class="coach" role="status"></div>
+    </section>
+
+    <section id="panel-build">
+      <h2>Build</h2>
+      <nav>
+        <button type="button" id="divider">Divider</button>
+        <button type="button" id="timer">555 timer</button>
+      </nav>
+      <textarea aria-label="SPICE netlist" id="source" rows="9" spellcheck="false"></textarea>
+      <div class="toolbar">
+        <button type="button" id="import" class="primary">Import netlist</button>
+      </div>
+      <p id="importMessage" class="status" role="status"></p>
+      <small>Supports R, C, DC voltage sources and one named NE555 terminal profile (TIMER_DEMO — interface only).</small>
+      <h2 style="margin-top:14px">Checklist</h2>
+      <ul id="buildChecklist" class="stack"></ul>
+      <button type="button" id="toInvestigate" class="primary" disabled>Continue to Investigate</button>
+    </section>
+
+    <section id="panel-investigate" hidden>
+      <h2>Investigate</h2>
+      <div class="stack">
+        <label>Symptom
+          <select id="symptom" aria-label="Reported symptom"></select>
+        </label>
+        <button type="button" id="startSymptom" class="primary">Start diagnostic loop</button>
+        <p class="muted">Yellow holes are the requested probe points. Capture a mock ADC reading (or enter volts).</p>
+        <label>Manual volts (optional)
+          <input id="manualVolts" type="number" step="0.01" placeholder="e.g. 0.05">
+        </label>
+        <div class="toolbar">
+          <button type="button" id="captureMock" class="primary">Capture mock reading</button>
+          <button type="button" id="captureManual">Use manual volts</button>
+        </div>
+        <div id="readings" class="readings"></div>
+        <button type="button" id="toRepair" disabled>Continue to Repair</button>
+      </div>
+    </section>
+
+    <section id="panel-repair" hidden>
+      <h2>Repair</h2>
+      <div class="stack">
+        <p id="repairTitle"></p>
+        <ol id="repairSteps"></ol>
+        <label>Mock hardware fault
+          <select id="fault" aria-label="Mock fault scenario"></select>
+        </label>
+        <small class="muted">Arduino UNO Q / serial measurement is stubbed. Changing the mock fault simulates the physical board.</small>
+        <div class="toolbar">
+          <button type="button" id="markRepaired" class="primary">Mark repaired (set Healthy)</button>
+          <button type="button" id="toVerify">Continue to Verify</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="panel-verify" hidden>
+      <h2>Verify</h2>
+      <div class="stack">
+        <p class="muted">Re-measure highlighted nets. With Mock fault = Healthy, expected rails should pass.</p>
+        <div class="toolbar">
+          <button type="button" id="captureVerify" class="primary">Capture mock reading</button>
+        </div>
+        <div id="verifyReadings" class="readings"></div>
+        <p id="verifyResult" class="status" role="status"></p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Parts tray</h2>
+      <div id="parts" class="tray"></div>
+    </section>
+  </aside>
+
+  <div>
+    <section>
+      <div class="toolbar">
+        <h2>Breadboard</h2>
+        <button type="button" id="rotate">Rotate 180°</button>
+        <button type="button" id="remove">Remove selected</button>
+        <button type="button" id="layout" class="primary">Auto-set</button>
+      </div>
+      <p class="muted">Drag a part onto a hole, or select it and click a hole. Hover a part to inspect its pins. Hold or drag it to reveal valid anchors. During Investigate/Verify, yellow holes request a probe.</p>
+      <div class="scroll"><div id="board" class="board"></div></div>
+      <p id="status" class="status" role="status"></p>
+    </section>
+    <div class="reports">
+      <section>
+        <h2>Terminal → pin → hole</h2>
+        <div id="mapping"></div>
+      </section>
+      <section>
+        <h2>Suggested jumpers</h2>
+        <p class="muted">Select a route to highlight its endpoints. Add wire draws it on the board. The first positive DC supply uses the top rails.</p>
+        <div id="jumpers"></div>
+      </section>
+    </div>
+  </div>
+</main>
+<script src="js/board.js"></script>
+<script src="js/diagnose.js"></script>
+<script src="js/app.js"></script>
+</html>
