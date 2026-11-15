@@ -212,7 +212,12 @@
           ...best,
           net,
           key: [net, ...best.labels].join('|'),
-          color: power === 0 ? '#bf3434' : power === 1 ? '#265ac5' : ['#653cc5', '#0c795c', '#a55f12'][result.length % 3]
+          color:
+            power === 0
+              ? '#e23b3b'
+              : power === 1
+                ? '#2f6fe0'
+                : ['#7b3fe0', '#1aa06a', '#e07a20', '#d9488b'][result.length % 4]
         });
         linked.push(next);
       }
@@ -262,6 +267,135 @@
     n.style.left = left + 'px';
     n.style.top = top + 'px';
     return n;
+  }
+
+  function prettyValue(raw) {
+    const s = String(raw || '').replace(/^DC\s+/i, '').trim();
+    const m = s.match(/^([0-9.]+)\s*([a-zµu]+)?$/i);
+    if (!m) return s;
+    const n = m[1];
+    const u = (m[2] || '').toLowerCase();
+    if (u.startsWith('u') || u.startsWith('µ') || u === 'uf') return n + 'µF';
+    if (u.startsWith('n')) return n + 'nF';
+    if (u.startsWith('p')) return n + 'pF';
+    if (u.startsWith('k')) return n + 'kΩ';
+    if (u === 'ohm' || u === 'r' || u === '') return n + (u ? 'Ω' : '');
+    return s;
+  }
+
+  function manhattanWire(x1, y1, x2, y2) {
+    // Prefer a tidy L / Z route (matches the inspo’s right-angle jumpers).
+    if (x1 === x2 || y1 === y2) return `M ${x1} ${y1} L ${x2} ${y2}`;
+    const dx = Math.abs(x2 - x1);
+    const dy = Math.abs(y2 - y1);
+    if (dx >= dy) {
+      const mid = Math.round((x1 + x2) / 2);
+      return `M ${x1} ${y1} L ${mid} ${y1} L ${mid} ${y2} L ${x2} ${y2}`;
+    }
+    const mid = Math.round((y1 + y2) / 2);
+    return `M ${x1} ${y1} L ${x1} ${mid} L ${x2} ${mid} L ${x2} ${y2}`;
+  }
+
+  function svgEl(name, attrs = {}) {
+    const n = document.createElementNS('http://www.w3.org/2000/svg', name);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, String(v));
+    return n;
+  }
+
+  function appendWires(board, routes) {
+    const svg = svgEl('svg', {
+      class: 'wires',
+      width: 696,
+      height: 455,
+      viewBox: '0 0 696 455',
+      'aria-hidden': 'true'
+    });
+    for (const w of routes) {
+      if (w.error || (!drawn.has(w.key) && highlight.join() !== w.labels.join())) continue;
+      const x1 = x(w.a[1]),
+        y1 = y(w.a[0]),
+        x2 = x(w.b[1]),
+        y2 = y(w.b[0]);
+      const hint = !drawn.has(w.key) && highlight.join() === w.labels.join();
+      const g = svgEl('g', { class: hint ? 'wire-g wire-hint' : drawn.has(w.key) ? 'wire-g wire-on' : 'wire-g' });
+      const d = manhattanWire(x1, y1, x2, y2);
+      // Soft contact shadow under the tube
+      g.appendChild(
+        svgEl('path', {
+          class: 'wire-shadow',
+          d,
+          fill: 'none',
+          stroke: 'rgba(0,0,0,.28)',
+          'stroke-width': 8,
+          'stroke-linecap': 'round',
+          'stroke-linejoin': 'round',
+          transform: 'translate(0 2)'
+        })
+      );
+      g.appendChild(
+        svgEl('path', {
+          class: 'wire-path',
+          d,
+          fill: 'none',
+          stroke: hint ? '#f0c020' : w.color,
+          'stroke-width': hint ? 3.5 : 6,
+          'stroke-linecap': 'round',
+          'stroke-linejoin': 'round',
+          'stroke-dasharray': hint ? '7 6' : 'none'
+        })
+      );
+      for (const [cx, cy] of [
+        [x1, y1],
+        [x2, y2]
+      ]) {
+        g.appendChild(
+          svgEl('circle', {
+            class: hint ? 'wire-plug wire-plug-hint' : 'wire-plug',
+            cx,
+            cy,
+            r: hint ? 6.5 : 5,
+            fill: hint ? '#f0c020' : w.color,
+            stroke: hint ? '#ffe9a0' : 'rgba(255,255,255,.35)',
+            'stroke-width': hint ? 2 : 1
+          })
+        );
+      }
+      svg.appendChild(g);
+    }
+    board.append(svg);
+  }
+
+  function makePiece(p, q) {
+    const kindClass =
+      p.kind === 'X' ? ' ic piece-x' : p.kind === 'R' ? ' piece-r' : p.kind === 'C' ? ' piece-c' : p.kind === 'V' ? ' piece-v' : '';
+    const chip = positioned(
+      el('button', undefined, 'piece' + kindClass),
+      x(q.c) + (p.kind === 'X' ? 57 : q.r >= 10 ? 0 : 38),
+      p.kind === 'X' ? (y(4) + y(5)) / 2 : q.r >= 10 ? (y(10) + y(11)) / 2 : y(q.r)
+    );
+    chip.title = p.id + ' · ' + p.value;
+    chip.setAttribute('aria-label', 'Select placed ' + p.id);
+    if (p.kind === 'X') {
+      chip.style.width = '148px';
+      chip.append(el('span', 'NE555', 'part-body'));
+      chip.append(el('span', flipped.has(p.id) ? '▸' : '◂', 'part-orient'));
+      for (let i = 0; i < 4; i++) {
+        chip.append(el('span', undefined, 'dip-pin dip-pin-t dip-pin-' + i));
+        chip.append(el('span', undefined, 'dip-pin dip-pin-b dip-pin-' + i));
+      }
+    } else if (p.kind === 'R') {
+      chip.append(el('span', undefined, 'part-lead lead-l'));
+      chip.append(el('span', undefined, 'part-body'));
+      chip.append(el('span', undefined, 'part-lead lead-r'));
+    } else if (p.kind === 'C') {
+      chip.append(el('span', prettyValue(p.value) || p.id, 'part-body'));
+    } else {
+      chip.append(el('span', p.id, 'part-body'));
+    }
+    chip.append(el('span', p.id, 'part-tag'));
+    chip.onclick = () => select(p.id);
+    drag(chip, p.id);
+    return chip;
   }
 
   const boardHoles = new Map();
@@ -409,13 +543,17 @@
     const hint = active && !placements.has(active.id) ? suggest(active) : null;
     const routes = plan();
     const occupied = [...placements.entries()].flatMap(([owner, p]) => p.pins.map((pin) => ({ ...pin, owner })));
-    for (let c = 1; c <= 17; c++) board.append(positioned(el('span', c, 'label'), x(c), 77));
+    for (let c = 1; c <= 17; c++) {
+      board.append(positioned(el('span', c, 'label'), x(c), 77));
+      board.append(positioned(el('span', c, 'label label-bottom'), x(c), 448));
+    }
     for (let r = 0; r < 14; r++) {
       if (r >= 10) {
-        const line = el('div', undefined, 'rail');
+        const line = el('div', undefined, 'rail' + (r % 2 ? ' rail-neg' : ' rail-pos'));
         line.style.top = y(r) + 'px';
-        line.style.background = r % 2 ? '#265ac5' : '#bf3434';
         board.append(line);
+        const mark = positioned(el('span', r % 2 ? '−' : '+', 'rail-mark' + (r % 2 ? ' neg' : ' pos')), 36, y(r));
+        board.append(mark);
       }
       board.append(positioned(el('span', rows[r] ?? rails[r - 10], 'label'), 20, y(r)));
       for (let c = 1; c <= 17; c++) {
@@ -470,18 +608,7 @@
       }
     }
 
-    for (const w of routes) {
-      if (w.error || (!drawn.has(w.key) && highlight.join() !== w.labels.join())) continue;
-      const dx = x(w.b[1]) - x(w.a[1]),
-        dy = y(w.b[0]) - y(w.a[0]);
-      const line = el('div', undefined, 'wire' + (drawn.has(w.key) ? ' wire-on' : ' wire-ghost'));
-      line.style.left = x(w.a[1]) + 'px';
-      line.style.top = y(w.a[0]) - 2 + 'px';
-      line.style.width = Math.hypot(dx, dy) + 'px';
-      line.style.transform = 'rotate(' + Math.atan2(dy, dx) + 'rad)';
-      line.style.setProperty('--wire', w.color);
-      board.append(line);
-    }
+    appendWires(board, routes);
     $('parts').replaceChildren();
     for (const p of parts) {
       const q = placements.get(p.id);
@@ -490,28 +617,7 @@
       button.onclick = () => select(p.id);
       drag(button, p.id);
       $('parts').append(button);
-      if (q) {
-        const kindClass =
-          p.kind === 'X' ? ' ic piece-x' : p.kind === 'R' ? ' piece-r' : p.kind === 'C' ? ' piece-c' : p.kind === 'V' ? ' piece-v' : '';
-        const label =
-          p.kind === 'X'
-            ? p.id + (flipped.has(p.id) ? ' ▸' : ' ◂')
-            : p.kind === 'C'
-              ? p.id
-              : p.id;
-        const chip = positioned(
-          el('button', label, 'piece' + kindClass),
-          x(q.c) + (p.kind === 'X' ? 57 : q.r >= 10 ? 0 : 38),
-          p.kind === 'X' ? (y(4) + y(5)) / 2 : q.r >= 10 ? (y(10) + y(11)) / 2 : y(q.r)
-        );
-        chip.title = p.id + ' · ' + p.value;
-        if (p.kind === 'X') chip.style.width = '142px';
-        if (p.kind === 'R' || p.kind === 'C') chip.dataset.value = p.value;
-        chip.setAttribute('aria-label', 'Select placed ' + p.id);
-        chip.onclick = () => select(p.id);
-        drag(chip, p.id);
-        board.append(chip);
-      }
+      if (q) board.append(makePiece(p, q));
     }
     const part = parts.find((p) => p.id === selected),
       mapping = $('mapping');
