@@ -77,9 +77,9 @@
     const w = canvas.width;
     const h = canvas.height;
     const scale = w / 720;
-    ctx.fillStyle = '#0d1520';
+    ctx.fillStyle = '#030303';
     ctx.fillRect(0, 0, w, h);
-    ctx.strokeStyle = '#243246';
+    ctx.strokeStyle = '#1a1a1a';
     ctx.lineWidth = Math.max(1, scale);
     const gx = 40 * scale;
     const gy = 28 * scale;
@@ -98,7 +98,7 @@
     const vmin = 0;
     const vmax = 5.5;
     const yAt = (v) => h - ((v - vmin) / (vmax - vmin)) * (h - 16 * scale) - 8 * scale;
-    ctx.strokeStyle = '#3a516a';
+    ctx.strokeStyle = '#2a2a2a';
     ctx.setLineDash([4 * scale, 4 * scale]);
     for (const v of [0, 1.65, 3.3, 5]) {
       const y = yAt(v);
@@ -106,19 +106,19 @@
       ctx.moveTo(0, y);
       ctx.lineTo(w, y);
       ctx.stroke();
-      ctx.fillStyle = '#7f93a8';
-      ctx.font = `${Math.max(11, 12 * scale)}px monospace`;
+      ctx.fillStyle = '#6a6a6a';
+      ctx.font = `${Math.max(11, 12 * scale)}px "IBM Plex Mono", monospace`;
       ctx.fillText(v.toFixed(2) + 'V', 6 * scale, y - 3 * scale);
     }
     ctx.setLineDash([]);
 
     if (!samples.length) {
-      ctx.fillStyle = '#7f93a8';
+      ctx.fillStyle = '#6a6a6a';
       ctx.fillText('No samples yet — press Run scope', 16 * scale, h / 2);
       return;
     }
 
-    ctx.strokeStyle = opts.color || '#78efd2';
+    ctx.strokeStyle = opts.color || '#3dff9a';
     ctx.lineWidth = Math.max(2, 2 * scale);
     ctx.beginPath();
     samples.forEach((v, i) => {
@@ -161,7 +161,7 @@
       state.samples = data.volts || [];
       state.source = data.source || 'mock';
       state.lastVolts = state.samples.length ? state.samples[state.samples.length - 1] : null;
-      draw(canvas, state.samples, { color: state.source === 'arduino' ? '#7bd9ef' : '#78efd2' });
+      draw(canvas, state.samples, { color: state.source === 'arduino' ? '#5ad6ff' : '#3dff9a' });
       if (readout) {
         const avg =
           state.samples.reduce((a, b) => a + b, 0) / Math.max(state.samples.length, 1);
@@ -190,7 +190,7 @@
     state.samples = data.volts || [];
     state.source = data.source || 'mock';
     state.lastVolts = state.samples.length ? state.samples[state.samples.length - 1] : null;
-    draw(canvas, state.samples, { color: state.source === 'arduino' ? '#7bd9ef' : '#78efd2' });
+    draw(canvas, state.samples, { color: state.source === 'arduino' ? '#5ad6ff' : '#3dff9a' });
     if (readout) {
       const avg = state.samples.reduce((a, b) => a + b, 0) / Math.max(state.samples.length, 1);
       readout.textContent = `${state.channel} · ${state.source} · single · avg ${avg.toFixed(2)} V`;
@@ -212,7 +212,7 @@
       expandBtn.disabled = state.expanded;
     }
     if (collapseBtn) collapseBtn.hidden = !state.expanded;
-    if (canvas) draw(canvas, state.samples, { color: state.source === 'arduino' ? '#7bd9ef' : '#78efd2' });
+    if (canvas) draw(canvas, state.samples, { color: state.source === 'arduino' ? '#5ad6ff' : '#3dff9a' });
   }
 
   global.Scope = {

@@ -52,8 +52,10 @@ The Coach panel shows live link status. **Capture reading** prefers Arduino; **F
 
 ## Demo path (555 timer)
 
-1. **Build** — Auto-set parts + jumpers → **Open Debug (A0 scope)** (or **Ask Gemini: process fault** once wiring is complete).
-2. **Debug** — Yellow holes mark A0 (VCC) probe points. **Run scope** / **Expand scope** for a larger view. When all wires are set, **Ask Gemini: process fault** captures the waveform and returns a diagnosis + repair steps.
+1. **Build** — Auto-set parts + jumpers → **Open Debug (A0 scope)**.
+2. **Debug** — Yellow holes mark A0 (VCC) probe points. **Run scope** / **Expand scope**, then **Analyze signal with Gemini** to diagnose the waveform.
+
+`Analyze signal with Gemini` requires `GEMINI_API_KEY` in `.env` (or a Cursor Cloud Agent secret). Without it, Coach shows a clear setup error instead of a silent mock pass.
 
 ## What is mocked vs live
 

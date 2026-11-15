@@ -281,7 +281,7 @@
     const snap = Board.snapshot();
     const payload = {
       stage: 'process_fault',
-      intent: 'diagnose_fault_and_solution',
+      intent: extra.intent || 'analyze_signal',
       symptom: state.symptom,
       fault: state.fault,
       readings: state.readings,
@@ -303,15 +303,16 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      if (!res.ok) throw new Error('diagnose failed');
+      if (!res.ok) throw new Error('diagnose failed (' + res.status + ')');
       const data = await res.json();
       state.coach = data.message || fallback;
       state.coachSource = data.source || 'mock';
       return data;
-    } catch {
-      state.coach = fallback;
+    } catch (err) {
+      const message = 'Gemini request failed: ' + (err?.message || 'network error');
+      state.coach = message;
       state.coachSource = 'local';
-      return { message: fallback, source: 'local' };
+      return { message, source: 'local', reason: 'network_error', error: String(err?.message || err) };
     }
   }
 
