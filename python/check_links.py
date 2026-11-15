@@ -23,24 +23,26 @@ def check_gemini() -> dict:
         return {"ok": False, "detail": "GEMINI_API_KEY not set (.env or export)"}
 
     models = list(getattr(server, "GEMINI_MODEL_FALLBACKS", [])) or [
-        os.environ.get("GEMINI_MODEL", "gemini-flash-latest"),
+        os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+        "gemini-2.5-flash-lite",
+        "gemini-flash-lite-latest",
         "gemini-flash-latest",
         "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
     ]
-    for discovered in getattr(server, "list_gemini_flash_models", lambda: [])():
-        if discovered not in models:
-            models.append(discovered)
-    # de-dupe
+    # de-dupe; keep short — ListModels only if these 404
     seen: set[str] = set()
     ordered = []
     for m in models:
         if m and m not in seen:
             seen.add(m)
             ordered.append(m)
+    ordered = ordered[:4]
 
     errors = []
-    for model in ordered:
+    saw_404 = False
+
+    def try_one(model: str) -> dict | None:
+        nonlocal saw_404
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
             f":generateContent?key={key}"
@@ -55,7 +57,7 @@ def check_gemini() -> dict:
             url, data=body, headers={"Content-Type": "application/json"}, method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             text = (
                 data.get("candidates", [{}])[0]
@@ -68,8 +70,25 @@ def check_gemini() -> dict:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:160]
             errors.append(f"{model}: HTTP {exc.code} {detail}")
+            if exc.code == 404:
+                saw_404 = True
+            return None
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{model}: {type(exc).__name__}: {exc}")
+            return None
+
+    for model in ordered:
+        hit = try_one(model)
+        if hit:
+            return hit
+
+    if saw_404:
+        for model in getattr(server, "list_gemini_flash_models", lambda: [])()[:2]:
+            if model in ordered:
+                continue
+            hit = try_one(model)
+            if hit:
+                return hit
 
     return {
         "ok": False,

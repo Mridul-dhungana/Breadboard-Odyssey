@@ -254,16 +254,19 @@
       }
       const samples = Scope.state.samples || [];
       const stats = signalStats(samples);
+      // Send a thin sample set — full sweeps only slow Gemini.
+      const step = Math.max(1, Math.floor(samples.length / 12));
+      const thinSamples = samples.filter((_, i) => i % step === 0).slice(0, 12);
       const data = await Diagnose.processFault({
         channel: ch,
         net: Scope.netFor(ch),
         holes: Scope.holesForChannel(ch).holes,
         intent: 'analyze_signal',
         scope: {
-          samples,
+          samples: thinSamples,
+          sampleCount: samples.length,
           lastVolts: Scope.state.lastVolts,
           source: Scope.state.source,
-          note: scopeData?.note,
           live: scopeData?.live === true,
           port: scopeData?.port,
           stats

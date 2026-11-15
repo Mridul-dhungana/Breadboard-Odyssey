@@ -39,21 +39,20 @@ from arduino_bridge import bridge  # noqa: E402
 
 PORT = int(os.environ.get("PORT", "8765"))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-# Current Flash IDs / aliases. Never include retired ids like gemini-1.5-flash.
-DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
+# Prefer lite/fast Flash aliases. Never include retired ids like gemini-1.5-flash.
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
+# Keep the happy-path list short so we do not burn seconds on sequential 404s.
 _DEFAULT_GEMINI_CANDIDATES = [
+    "gemini-2.5-flash-lite",
+    "gemini-flash-lite-latest",
     "gemini-flash-latest",
     "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-3.5-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-3.8-flash",
-    "gemini-3.6-flash",
-    "gemini-3.0-flash",
-    "gemini-2.0-flash",
-    "gemini-flash-lite-latest",
 ]
+_GEMINI_MAX_ATTEMPTS = 3
+_GEMINI_HTTP_TIMEOUT_S = float(os.environ.get("GEMINI_TIMEOUT_S", "14"))
+_GEMINI_LIST_TIMEOUT_S = 8.0
+_LAST_GEMINI_CFG_AT = 0.0
 
 
 def _dedupe_models(*groups: list[str]) -> list[str]:
@@ -82,13 +81,18 @@ _DISCOVERED_GEMINI_MODELS: list[str] | None = None
 def refresh_runtime_config() -> None:
     """Reload .env for Gemini + Arduino without restarting the process."""
     _load_dotenv(ROOT / ".env", override=True)
-    refresh_gemini_config()
+    refresh_gemini_config(force=True)
     bridge.refresh_config()
 
 
-def refresh_gemini_config() -> None:
+def refresh_gemini_config(*, force: bool = False) -> None:
     """Reload .env so a newly added GEMINI_API_KEY is picked up without a full process restart."""
-    global GEMINI_API_KEY, GEMINI_MODEL, GEMINI_MODEL_FALLBACKS, ACTIVE_GEMINI_MODEL, _DISCOVERED_GEMINI_MODELS
+    global GEMINI_API_KEY, GEMINI_MODEL, GEMINI_MODEL_FALLBACKS, ACTIVE_GEMINI_MODEL
+    global _DISCOVERED_GEMINI_MODELS, _LAST_GEMINI_CFG_AT
+    now = time.monotonic()
+    # Avoid re-reading .env on every diagnose tick — that alone adds latency.
+    if not force and _LAST_GEMINI_CFG_AT and (now - _LAST_GEMINI_CFG_AT) < 8.0:
+        return
     prev_key = GEMINI_API_KEY
     _load_dotenv(ROOT / ".env", override=True)
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -101,12 +105,15 @@ def refresh_gemini_config() -> None:
         if requested in GEMINI_MODEL_FALLBACKS
         else (GEMINI_MODEL_FALLBACKS[0] if GEMINI_MODEL_FALLBACKS else DEFAULT_GEMINI_MODEL)
     )
-    if ACTIVE_GEMINI_MODEL not in GEMINI_MODEL_FALLBACKS:
+    if ACTIVE_GEMINI_MODEL not in GEMINI_MODEL_FALLBACKS and (
+        _DISCOVERED_GEMINI_MODELS is None or ACTIVE_GEMINI_MODEL not in (_DISCOVERED_GEMINI_MODELS or [])
+    ):
         ACTIVE_GEMINI_MODEL = GEMINI_MODEL
+    _LAST_GEMINI_CFG_AT = now
 
 
 def list_gemini_flash_models() -> list[str]:
-    """Ask Google which generateContent flash models this key can use."""
+    """Ask Google which generateContent flash models this key can use (cached)."""
     global _DISCOVERED_GEMINI_MODELS
     if _DISCOVERED_GEMINI_MODELS is not None:
         return list(_DISCOVERED_GEMINI_MODELS)
@@ -115,7 +122,7 @@ def list_gemini_flash_models() -> list[str]:
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
     try:
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=12) as resp:
+        with urllib.request.urlopen(req, timeout=_GEMINI_LIST_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:  # noqa: BLE001
         print(f"[gemini] ListModels failed: {exc}")
@@ -135,16 +142,16 @@ def list_gemini_flash_models() -> list[str]:
         if any(skip in low for skip in ("image", "audio", "tts", "live", "embed", "robot")):
             continue
         found.append(name)
-    # Prefer latest / lighter flash aliases first
+
     def rank(m: str) -> tuple[int, str]:
         ml = m.lower()
         score = 0
-        if "flash-latest" in ml:
-            score += 100
         if "lite" in ml:
-            score += 20
-        if "2.5" in ml or "3.5" in ml or "3.8" in ml or "3.6" in ml:
-            score += 10
+            score += 40
+        if "flash-latest" in ml or "flash-lite-latest" in ml:
+            score += 30
+        if "2.5" in ml:
+            score += 15
         return (-score, ml)
 
     found.sort(key=rank)
@@ -227,7 +234,7 @@ def _format_http_error(exc: urllib.error.HTTPError) -> str:
     return f"HTTP {exc.code} {exc.reason}" + (f": {body}" if body else "")
 
 
-def _gemini_generate(prompt: str, model: str, max_tokens: int = 260) -> str | None:
+def _gemini_generate(prompt: str, model: str, max_tokens: int = 220) -> str | None:
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
         f":generateContent?key={GEMINI_API_KEY}"
@@ -235,8 +242,14 @@ def _gemini_generate(prompt: str, model: str, max_tokens: int = 260) -> str | No
     body = json.dumps(
         {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.35, "maxOutputTokens": max_tokens},
-        }
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": max_tokens,
+                # Favor shorter completions for interactive lab coaching.
+                "candidateCount": 1,
+            },
+        },
+        separators=(",", ":"),
     ).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -244,7 +257,7 @@ def _gemini_generate(prompt: str, model: str, max_tokens: int = 260) -> str | No
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=_GEMINI_HTTP_TIMEOUT_S) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     text = (
         data.get("candidates", [{}])[0]
@@ -255,79 +268,141 @@ def _gemini_generate(prompt: str, model: str, max_tokens: int = 260) -> str | No
     return (text or "").strip() or None
 
 
+def _slim_diagnose_context(payload: dict) -> dict:
+    """Keep Gemini prompts small — large JSON is the main latency tax."""
+    ctx: dict = {
+        "stage": payload.get("stage"),
+        "intent": payload.get("intent"),
+        "channel": payload.get("channel"),
+        "net": payload.get("net"),
+        "holes": payload.get("holes"),
+        "symptom": payload.get("symptom"),
+    }
+    circuit = payload.get("circuit")
+    if isinstance(circuit, dict):
+        ctx["circuit"] = {
+            "hasTimer": circuit.get("hasTimer"),
+            "allPlaced": circuit.get("allPlaced"),
+            "allJumpersDrawn": circuit.get("allJumpersDrawn"),
+            "jumperCount": circuit.get("jumperCount"),
+        }
+    readings = payload.get("readings")
+    if isinstance(readings, list) and readings:
+        # Last few live readings only
+        slim = []
+        for r in readings[-6:]:
+            if not isinstance(r, dict):
+                continue
+            slim.append(
+                {
+                    k: r.get(k)
+                    for k in ("net", "voltage", "ok", "source", "channel")
+                    if k in r
+                }
+            )
+        ctx["readings"] = slim
+    if isinstance(payload.get("scope"), dict):
+        scope = dict(payload["scope"])
+        samples = scope.get("samples") or []
+        if isinstance(samples, list) and samples:
+            scope["sampleCount"] = len(samples)
+            # 12 evenly spaced samples + stats is enough for rail/fault cues
+            step = max(1, len(samples) // 12)
+            scope["samples"] = [round(float(v), 3) for v in samples[::step][:12]]
+        for heavy in ("note",):
+            scope.pop(heavy, None)
+        ctx["scope"] = scope
+    # Drop empty keys
+    return {k: v for k, v in ctx.items() if v is not None and v != {}}
+
+
+def _model_queue() -> list[str]:
+    """Active model first, then short fallbacks (no ListModels on happy path)."""
+    return _dedupe_models(
+        [ACTIVE_GEMINI_MODEL, GEMINI_MODEL],
+        GEMINI_MODEL_FALLBACKS,
+        _DEFAULT_GEMINI_CANDIDATES,
+    )
+
+
 def gemini_diagnose(payload: dict) -> tuple[str | None, str | None, str | None]:
-    """Returns (message, model_used, error). Tries Flash model fallbacks if one 404s."""
+    """Returns (message, model_used, error). Fast path: one model; discover only after 404s."""
     global ACTIVE_GEMINI_MODEL, LAST_GEMINI_ERROR
+    t0 = time.monotonic()
     refresh_gemini_config()
     LAST_GEMINI_ERROR = None
     if not GEMINI_API_KEY:
         LAST_GEMINI_ERROR = "GEMINI_API_KEY not set"
         return None, None, LAST_GEMINI_ERROR
-    expected_block = {k: v for k, v in EXPECTED.items() if k != "GND"}
-    # Trim huge sample arrays so the prompt stays small/fast
-    ctx = dict(payload)
-    if isinstance(ctx.get("scope"), dict):
-        scope = dict(ctx["scope"])
-        samples = scope.get("samples") or []
-        if isinstance(samples, list) and len(samples) > 24:
-            scope["sampleCount"] = len(samples)
-            scope["samples"] = samples[:: max(1, len(samples) // 24)][:24]
-            ctx["scope"] = scope
+    expected_block = {k: {"nom": v["nom"], "tol": v["tol"]} for k, v in EXPECTED.items() if k != "GND"}
+    ctx = _slim_diagnose_context(payload)
+    dump = json.dumps({"expected": expected_block, "session": ctx}, separators=(",", ":"))
     stage = ctx.get("stage")
     if stage == "process_fault":
         prompt = (
-            "You are an electronics lab coach for Breadboard Odyssey.\n"
-            "Circuit: 555 TIMER_DEMO on a solderless breadboard (wiring fixture — not a SPICE model).\n"
-            "The student pressed Analyze signal with Gemini after capturing an oscilloscope sweep.\n"
-            "Analyze the waveform/signal stats vs expected rails and give a diagnosis:\n"
-            "(1) what the signal suggests (healthy rail, open supply, stuck output, oscillating, noise, etc.),\n"
-            "(2) most likely fault in one short sentence,\n"
-            "(3) 2-4 concrete next repair/probe steps (net/hole/jumper).\n"
-            "Treat scope volts as physical Arduino truth only (source must be arduino). "
-            "No markdown headings. Short plain sentences or a compact numbered list.\n\n"
-            f"Expected rails (nom/tol):\n{json.dumps(expected_block, indent=2)}\n\n"
-            f"Session context:\n{json.dumps(ctx, indent=2)}\n"
+            "Electronics lab coach for 555 TIMER_DEMO (breadboard, not SPICE). "
+            "Student captured a LIVE Arduino scope sweep. Reply in under 80 words: "
+            "(1) signal type (rail/open/stuck/oscillating/noise), "
+            "(2) likely fault one sentence, "
+            "(3) 2-3 concrete next probe/repair steps. No markdown.\n"
+            f"{dump}"
         )
-        max_tokens = 480
+        max_tokens = 220
     else:
         prompt = (
-            "You are an electronics lab coach for Breadboard Odyssey.\n"
-            "Circuit: 555 TIMER_DEMO on a solderless breadboard (wiring fixture — not a SPICE model).\n"
-            "Hardware: optional Arduino UNO Q measuring ADC channels mapped to nets.\n"
-            "Job: interpret the latest LIVE Arduino voltage vs expected rails and give ONE clear next action "
-            "(which net/hole to probe next, which jumper to fix, or verify). "
-            "Treat volts as physical truth. 1-3 short sentences. No markdown, no bullet lists.\n\n"
-            f"Expected rails (nom/tol):\n{json.dumps(expected_block, indent=2)}\n\n"
-            f"Session context:\n{json.dumps(ctx, indent=2)}\n"
+            "Electronics lab coach for 555 TIMER_DEMO. "
+            "Interpret LIVE Arduino volts vs expected rails. "
+            "Give ONE next action in 1-2 short sentences. No markdown.\n"
+            f"{dump}"
         )
-        max_tokens = 260
-    models = list(GEMINI_MODEL_FALLBACKS)
-    # If configured ids 404, discover live flash models for this API key.
-    for discovered in list_gemini_flash_models():
-        if discovered not in models:
-            models.append(discovered)
+        max_tokens = 120
 
+    models = _model_queue()[:_GEMINI_MAX_ATTEMPTS]
     errors: list[str] = []
-    for model in models:
-        try:
-            text = _gemini_generate(prompt, model, max_tokens=max_tokens)
-            if text:
-                ACTIVE_GEMINI_MODEL = model
-                LAST_GEMINI_ERROR = None
-                return text, model, None
-            errors.append(f"{model}: empty response")
-        except urllib.error.HTTPError as exc:
-            msg = f"{model}: {_format_http_error(exc)}"
-            errors.append(msg)
-            print(f"[gemini] {msg}")
-            continue
-        except (urllib.error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError) as exc:
-            msg = f"{model}: {exc}"
-            errors.append(msg)
-            print(f"[gemini] {msg}")
-            continue
+    saw_not_found = False
+
+    def try_models(candidates: list[str]) -> tuple[str | None, str | None]:
+        nonlocal saw_not_found
+        for model in candidates:
+            try:
+                text = _gemini_generate(prompt, model, max_tokens=max_tokens)
+                if text:
+                    return text, model
+                errors.append(f"{model}: empty response")
+            except urllib.error.HTTPError as exc:
+                msg = f"{model}: {_format_http_error(exc)}"
+                errors.append(msg)
+                print(f"[gemini] {msg}")
+                if exc.code == 404:
+                    saw_not_found = True
+                # Auth / quota — don't burn more attempts
+                if exc.code in (401, 403, 429):
+                    break
+                continue
+            except (urllib.error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError) as exc:
+                msg = f"{model}: {exc}"
+                errors.append(msg)
+                print(f"[gemini] {msg}")
+                continue
+        return None, None
+
+    text, model = try_models(models)
+    # Only pay for ListModels after configured ids 404 — never on the happy path.
+    if text is None and saw_not_found:
+        discovered = [m for m in list_gemini_flash_models() if m not in models][:2]
+        if discovered:
+            print(f"[gemini] discovering fallbacks: {discovered}")
+            text, model = try_models(discovered)
+
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    if text and model:
+        ACTIVE_GEMINI_MODEL = model
+        LAST_GEMINI_ERROR = None
+        print(f"[gemini] ok model={model} {elapsed_ms}ms")
+        return text, model, None
+
     LAST_GEMINI_ERROR = " | ".join(errors[-3:]) if errors else "all Gemini models failed"
-    print(f"[gemini] all models failed; {LAST_GEMINI_ERROR}")
+    print(f"[gemini] all models failed ({elapsed_ms}ms); {LAST_GEMINI_ERROR}")
     return None, None, LAST_GEMINI_ERROR
 
 

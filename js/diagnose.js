@@ -219,15 +219,12 @@
       stage: 'process_fault',
       intent: extra.intent || 'analyze_signal',
       symptom: state.symptom,
-      readings: state.readings,
+      readings: (state.readings || []).slice(-6),
       circuit: {
         hasTimer: snap.hasTimer,
         allPlaced: snap.allPlaced,
         allJumpersDrawn: snap.allJumpersDrawn,
-        jumperCount: snap.jumpersDrawn?.length ?? 0,
-        parts: snap.parts,
-        jumpers: snap.routes,
-        nets: snap.placements.flatMap((p) => p.pins.map((pin) => pin.net))
+        jumperCount: snap.jumpersDrawn?.length ?? 0
       },
       ...extra
     };
