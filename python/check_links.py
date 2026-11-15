@@ -23,11 +23,14 @@ def check_gemini() -> dict:
         return {"ok": False, "detail": "GEMINI_API_KEY not set (.env or export)"}
 
     models = list(getattr(server, "GEMINI_MODEL_FALLBACKS", [])) or [
-        os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
-        "gemini-3.6-flash",
+        os.environ.get("GEMINI_MODEL", "gemini-flash-latest"),
         "gemini-flash-latest",
         "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
     ]
+    for discovered in getattr(server, "list_gemini_flash_models", lambda: [])():
+        if discovered not in models:
+            models.append(discovered)
     # de-dupe
     seen: set[str] = set()
     ordered = []

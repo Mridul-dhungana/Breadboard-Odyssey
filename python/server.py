@@ -39,22 +39,41 @@ from arduino_bridge import bridge  # noqa: E402
 
 PORT = int(os.environ.get("PORT", "8765"))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-# Prefer widely available Flash models; keep newer aliases as optional overrides.
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
-_gemini_candidates = [
-    GEMINI_MODEL,
-    "gemini-2.5-flash",
+# Current Flash IDs / aliases. Never include retired ids like gemini-1.5-flash.
+DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
+_DEFAULT_GEMINI_CANDIDATES = [
     "gemini-flash-latest",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.8-flash",
     "gemini-3.6-flash",
+    "gemini-3.0-flash",
+    "gemini-2.0-flash",
+    "gemini-flash-lite-latest",
 ]
-GEMINI_MODEL_FALLBACKS: list[str] = []
-for _m in _gemini_candidates:
-    if _m and _m not in GEMINI_MODEL_FALLBACKS:
-        GEMINI_MODEL_FALLBACKS.append(_m)
+
+
+def _dedupe_models(*groups: list[str]) -> list[str]:
+    out: list[str] = []
+    for group in groups:
+        for model in group:
+            name = (model or "").strip()
+            if not name or name in out:
+                continue
+            # Drop known-dead / unsupported ids that only produce 404 noise.
+            if name in {"gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro", "gemini-pro"}:
+                continue
+            out.append(name)
+    return out
+
+
+GEMINI_MODEL_FALLBACKS: list[str] = _dedupe_models([GEMINI_MODEL], _DEFAULT_GEMINI_CANDIDATES)
 ACTIVE_GEMINI_MODEL = GEMINI_MODEL
 LAST_GEMINI_ERROR: str | None = None
+_DISCOVERED_GEMINI_MODELS: list[str] | None = None
 
 
 def refresh_runtime_config() -> None:
@@ -66,24 +85,68 @@ def refresh_runtime_config() -> None:
 
 def refresh_gemini_config() -> None:
     """Reload .env so a newly added GEMINI_API_KEY is picked up without a full process restart."""
-    global GEMINI_API_KEY, GEMINI_MODEL, GEMINI_MODEL_FALLBACKS, ACTIVE_GEMINI_MODEL
+    global GEMINI_API_KEY, GEMINI_MODEL, GEMINI_MODEL_FALLBACKS, ACTIVE_GEMINI_MODEL, _DISCOVERED_GEMINI_MODELS
+    prev_key = GEMINI_API_KEY
     _load_dotenv(ROOT / ".env", override=True)
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-    GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
-    candidates = [
-        GEMINI_MODEL,
-        "gemini-2.5-flash",
-        "gemini-flash-latest",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-3.6-flash",
-    ]
-    GEMINI_MODEL_FALLBACKS = []
-    for model in candidates:
-        if model and model not in GEMINI_MODEL_FALLBACKS:
-            GEMINI_MODEL_FALLBACKS.append(model)
+    if GEMINI_API_KEY != prev_key:
+        _DISCOVERED_GEMINI_MODELS = None
+    requested = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
+    GEMINI_MODEL_FALLBACKS = _dedupe_models([requested], _DEFAULT_GEMINI_CANDIDATES)
+    GEMINI_MODEL = (
+        requested
+        if requested in GEMINI_MODEL_FALLBACKS
+        else (GEMINI_MODEL_FALLBACKS[0] if GEMINI_MODEL_FALLBACKS else DEFAULT_GEMINI_MODEL)
+    )
     if ACTIVE_GEMINI_MODEL not in GEMINI_MODEL_FALLBACKS:
         ACTIVE_GEMINI_MODEL = GEMINI_MODEL
+
+
+def list_gemini_flash_models() -> list[str]:
+    """Ask Google which generateContent flash models this key can use."""
+    global _DISCOVERED_GEMINI_MODELS
+    if _DISCOVERED_GEMINI_MODELS is not None:
+        return list(_DISCOVERED_GEMINI_MODELS)
+    if not GEMINI_API_KEY:
+        return []
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[gemini] ListModels failed: {exc}")
+        _DISCOVERED_GEMINI_MODELS = []
+        return []
+    found: list[str] = []
+    for item in data.get("models") or []:
+        methods = item.get("supportedGenerationMethods") or []
+        if "generateContent" not in methods:
+            continue
+        name = str(item.get("name") or "")
+        if name.startswith("models/"):
+            name = name[len("models/") :]
+        low = name.lower()
+        if "flash" not in low:
+            continue
+        if any(skip in low for skip in ("image", "audio", "tts", "live", "embed", "robot")):
+            continue
+        found.append(name)
+    # Prefer latest / lighter flash aliases first
+    def rank(m: str) -> tuple[int, str]:
+        ml = m.lower()
+        score = 0
+        if "flash-latest" in ml:
+            score += 100
+        if "lite" in ml:
+            score += 20
+        if "2.5" in ml or "3.5" in ml or "3.8" in ml or "3.6" in ml:
+            score += 10
+        return (-score, ml)
+
+    found.sort(key=rank)
+    _DISCOVERED_GEMINI_MODELS = found
+    return list(found)
 
 # TIMER_DEMO expected rails / nets (interface fixture — not SPICE).
 EXPECTED = {
@@ -235,25 +298,33 @@ def gemini_diagnose(payload: dict) -> tuple[str | None, str | None, str | None]:
             f"Session context:\n{json.dumps(ctx, indent=2)}\n"
         )
         max_tokens = 260
-    last_err: str | None = None
-    for model in GEMINI_MODEL_FALLBACKS:
+    models = list(GEMINI_MODEL_FALLBACKS)
+    # If configured ids 404, discover live flash models for this API key.
+    for discovered in list_gemini_flash_models():
+        if discovered not in models:
+            models.append(discovered)
+
+    errors: list[str] = []
+    for model in models:
         try:
             text = _gemini_generate(prompt, model, max_tokens=max_tokens)
             if text:
                 ACTIVE_GEMINI_MODEL = model
                 LAST_GEMINI_ERROR = None
                 return text, model, None
-            last_err = f"{model}: empty response"
+            errors.append(f"{model}: empty response")
         except urllib.error.HTTPError as exc:
-            last_err = f"{model}: {_format_http_error(exc)}"
-            print(f"[gemini] {last_err}")
+            msg = f"{model}: {_format_http_error(exc)}"
+            errors.append(msg)
+            print(f"[gemini] {msg}")
             continue
         except (urllib.error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError) as exc:
-            last_err = f"{model}: {exc}"
-            print(f"[gemini] {last_err}")
+            msg = f"{model}: {exc}"
+            errors.append(msg)
+            print(f"[gemini] {msg}")
             continue
-    LAST_GEMINI_ERROR = last_err or "all Gemini models failed"
-    print(f"[gemini] all models failed; last error: {LAST_GEMINI_ERROR}")
+    LAST_GEMINI_ERROR = " | ".join(errors[-3:]) if errors else "all Gemini models failed"
+    print(f"[gemini] all models failed; {LAST_GEMINI_ERROR}")
     return None, None, LAST_GEMINI_ERROR
 
 
