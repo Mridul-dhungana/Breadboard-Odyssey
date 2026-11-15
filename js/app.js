@@ -126,6 +126,32 @@
     Board.status(`Debug: probe ${ch} (${net}). Yellow = probing points.`);
   }
 
+  function fillArduinoPorts(arduino) {
+    const sel = $('arduinoPort');
+    if (!sel) return;
+    const ports = arduino?.ports || [];
+    const current = arduino?.port || '';
+    const prev = sel.value;
+    sel.replaceChildren();
+    const auto = document.createElement('option');
+    auto.value = '';
+    auto.textContent = 'Auto-detect';
+    sel.append(auto);
+    for (const p of ports) {
+      const opt = document.createElement('option');
+      opt.value = p.device;
+      opt.textContent = `${p.device}${p.description ? ' — ' + p.description : ''}`;
+      sel.append(opt);
+    }
+    if (current && ![...sel.options].some((o) => o.value === current)) {
+      const opt = document.createElement('option');
+      opt.value = current;
+      opt.textContent = current + (arduino?.autodetected ? ' (auto)' : '');
+      sel.append(opt);
+    }
+    sel.value = prev || current || '';
+  }
+
   async function refreshHwStatus() {
     const el = $('hwStatus');
     if (!el) return;
@@ -135,14 +161,19 @@
       geminiReady = !!data.gemini?.configured;
       const gem = geminiReady
         ? `Gemini ready (${data.gemini.model})`
-        : 'Gemini off — add GEMINI_API_KEY to .env (or Cursor environment secrets), then restart the server';
+        : 'Gemini off — add GEMINI_API_KEY to .env, then Refresh links';
       const ard = data.arduino || {};
+      fillArduinoPorts(ard);
       let a;
-      if (!ard.enabled) a = 'Arduino off — set ARDUINO_PORT for live A0';
-      else if (ard.connected) a = `Arduino live on ${ard.port}`;
-      else a = `Arduino ${ard.port} not connected${ard.lastError ? ' (' + ard.lastError + ')' : ''}`;
+      if (!ard.enabled) {
+        a = 'Arduino off — plug in board or set ARDUINO_PORT (scope will not invent live data)';
+      } else if (ard.connected) {
+        a = `Arduino LIVE on ${ard.port}${ard.autodetected ? ' (auto)' : ''}`;
+      } else {
+        a = `Arduino ${ard.port} not connected${ard.lastError ? ' (' + ard.lastError + ')' : ''}`;
+      }
       el.textContent = gem + ' · ' + a;
-      el.className = 'hw-status ' + (geminiReady ? 'ok' : 'error');
+      el.className = 'hw-status ' + (ard.connected ? 'ok' : 'error');
       updateProcessFaultButtons(wiringReady(Board.snapshot()));
     } catch {
       geminiReady = false;
@@ -208,6 +239,24 @@
         updateCoach('Could not capture scope signal: ' + e.message, 'local', 'error');
         return;
       }
+      if (scopeData?.source === 'error' || (scopeData?.live === false && scopeData?.arduinoError)) {
+        updateCoach(
+          'Cannot analyze live signal — Arduino is not providing data: ' +
+            (scopeData.arduinoError || scopeData.note || 'not connected') +
+            '. Pick the serial port, click Reconnect Arduino, then try again.',
+          'local',
+          'error'
+        );
+        return;
+      }
+      if (scopeData?.source === 'mock') {
+        updateCoach(
+          'Scope is still on MOCK data, not the Arduino. Connect the board (ARDUINO_PORT / Reconnect), confirm readout says LIVE, then analyze again.',
+          'local',
+          'warn'
+        );
+        return;
+      }
       const samples = Scope.state.samples || [];
       const stats = signalStats(samples);
       const data = await Diagnose.processFault({
@@ -220,6 +269,8 @@
           lastVolts: Scope.state.lastVolts,
           source: Scope.state.source,
           note: scopeData?.note,
+          live: scopeData?.live === true,
+          port: scopeData?.port,
           stats
         }
       });
@@ -286,13 +337,27 @@
 
     $('refreshHw').onclick = () => refreshHwStatus();
     $('reconnectArduino').onclick = async () => {
+      const port = $('arduinoPort')?.value || '';
       try {
-        await fetch('/api/arduino/reconnect', {
+        const res = await fetch('/api/arduino/reconnect', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: '{}'
+          body: JSON.stringify({ port })
         });
-      } catch {}
+        const data = await res.json();
+        if (!data.ok) {
+          updateCoach(
+            'Arduino reconnect failed: ' + (data.arduino?.lastError || 'no port / not connected') +
+              '. Scope will not show fake live waveforms until the board links.',
+            'local',
+            'error'
+          );
+        } else {
+          updateCoach('Arduino linked on ' + (data.arduino?.port || port) + '. Run scope for LIVE samples.', 'local');
+        }
+      } catch (e) {
+        updateCoach('Arduino reconnect error: ' + e.message, 'local', 'error');
+      }
       await refreshHwStatus();
     };
 

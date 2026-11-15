@@ -21,6 +21,11 @@
       <h2>Coach</h2>
       <div id="coach" class="coach" role="status"></div>
       <p id="hwStatus" class="hw-status muted" role="status">Checking Arduino / Gemini…</p>
+      <label class="hw-port">Arduino port
+        <select id="arduinoPort" aria-label="Arduino serial port">
+          <option value="">Auto-detect</option>
+        </select>
+      </label>
       <div class="toolbar" style="margin-bottom:0">
         <button type="button" id="refreshHw">Refresh links</button>
         <button type="button" id="reconnectArduino">Reconnect Arduino</button>

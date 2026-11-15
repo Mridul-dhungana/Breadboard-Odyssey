@@ -56,8 +56,20 @@ for _m in _gemini_candidates:
     if _m and _m not in GEMINI_MODEL_FALLBACKS:
         GEMINI_MODEL_FALLBACKS.append(_m)
 PREFER_ARDUINO = os.environ.get("PREFER_ARDUINO", "1").strip() not in ("0", "false", "False")
+# When Arduino is expected, never invent pretty fake scope waveforms on failure.
+ALLOW_MOCK_SCOPE = os.environ.get("ALLOW_MOCK_SCOPE", "0").strip() in ("1", "true", "True")
 ACTIVE_GEMINI_MODEL = GEMINI_MODEL
 LAST_GEMINI_ERROR: str | None = None
+
+
+def refresh_runtime_config() -> None:
+    """Reload .env for Gemini + Arduino without restarting the process."""
+    global PREFER_ARDUINO, ALLOW_MOCK_SCOPE
+    _load_dotenv(ROOT / ".env", override=True)
+    PREFER_ARDUINO = os.environ.get("PREFER_ARDUINO", "1").strip() not in ("0", "false", "False")
+    ALLOW_MOCK_SCOPE = os.environ.get("ALLOW_MOCK_SCOPE", "0").strip() in ("1", "true", "True")
+    refresh_gemini_config()
+    bridge.refresh_config()
 
 
 def refresh_gemini_config() -> None:
@@ -451,8 +463,8 @@ class Handler(SimpleHTTPRequestHandler):
             self._serve_index()
             return
         if path == "/api/status":
-            refresh_gemini_config()
-            if bridge.enabled:
+            refresh_runtime_config()
+            if PREFER_ARDUINO:
                 bridge.connect()
             self._json(
                 200,
@@ -465,6 +477,7 @@ class Handler(SimpleHTTPRequestHandler):
                     },
                     "arduino": bridge.status(),
                     "preferArduino": PREFER_ARDUINO,
+                    "allowMockScope": ALLOW_MOCK_SCOPE,
                     "expected": EXPECTED,
                     "ui": {
                         "root": str(ROOT),
@@ -496,7 +509,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/diagnose":
             data = self._read_json()
-            refresh_gemini_config()
+            refresh_runtime_config()
             # Enrich with live hardware status so Gemini knows what's real
             data["hardware"] = {
                 "arduino": bridge.status(),
@@ -523,14 +536,26 @@ class Handler(SimpleHTTPRequestHandler):
                 )
             return
         if self.path == "/api/arduino/reconnect":
+            refresh_runtime_config()
+            data = self._read_json()
+            port = str(data.get("port") or "").strip()
+            if port:
+                os.environ["ARDUINO_PORT"] = port
             bridge.close()
+            bridge.refresh_config()
             ok = bridge.connect()
             self._json(200, {"ok": ok, "arduino": bridge.status()})
             return
+        if self.path == "/api/arduino/ports":
+            refresh_runtime_config()
+            self._json(200, {"ports": bridge.status().get("ports", []), "arduino": bridge.status()})
+            return
         if self.path == "/api/scope":
+            refresh_runtime_config()
             data = self._read_json()
             channel = str(data.get("channel", "A0")).upper()
             count = max(8, min(int(data.get("samples", 40)), 200))
+            force_mock = bool(data.get("forceMock"))
             # Map channel → net using bridge defaults
             net = None
             for n, ch in bridge.net_map.items():
@@ -545,22 +570,37 @@ class Handler(SimpleHTTPRequestHandler):
             volts: list[float] = []
             source = "mock"
             note = ""
-            if PREFER_ARDUINO and bridge.enabled:
+            arduino_error = None
+            want_live = PREFER_ARDUINO and not force_mock
+
+            if want_live:
                 try:
+                    if not bridge.enabled:
+                        raise RuntimeError(
+                            "No Arduino port found. Set ARDUINO_PORT in .env (e.g. /dev/ttyACM0 or COM3) "
+                            "or plug in the board and click Reconnect Arduino."
+                        )
                     if not bridge.connect():
                         raise RuntimeError(bridge.last_error or "not connected")
                     volts = [round(v, 3) for v in bridge.read_sweep(channel, count, net=net)]
+                    if not volts:
+                        raise RuntimeError("Arduino returned an empty sweep")
                     source = "arduino"
-                    note = f"Live batch sweep from {bridge.port} {channel}"
+                    note = f"Live sweep from {bridge.port} {channel}"
                 except Exception as exc:  # noqa: BLE001
-                    note = f"Arduino sweep failed ({exc}); mock waveform"
-                    source = "mock"
-            if not volts:
-                # Mock waveforms: A0/VCC ≈ DC rail; A2/OUT ≈ slow square (555-ish)
+                    arduino_error = str(exc)
+                    note = f"Arduino sweep failed: {exc}"
+                    source = "error"
+                    volts = []
+                    # Only invent waveforms when explicitly allowed — never silently.
+                    if ALLOW_MOCK_SCOPE or force_mock:
+                        source = "mock"
+                        note = f"MOCK waveform (Arduino failed: {exc})"
+
+            if source == "mock" and not volts and (force_mock or ALLOW_MOCK_SCOPE or not want_live):
                 base = mock_voltage(net, fault)
                 for i in range(count):
                     if channel == "A2" or net == "OUT":
-                        # ~500 Hz square-ish mock between rails
                         phase = math.sin(2 * math.pi * 8 * (i / count))
                         v = 4.8 if phase >= 0 else 0.2
                         v += random.uniform(-0.05, 0.05)
@@ -571,7 +611,9 @@ class Handler(SimpleHTTPRequestHandler):
                         v = base + random.uniform(-0.03, 0.03)
                     volts.append(round(max(0.0, min(5.2, v)), 3))
                 if not note:
-                    note = "Mock scope sweep (set ARDUINO_PORT for live A0)"
+                    note = "Mock scope sweep (Arduino not linked — set ARDUINO_PORT for live A0)"
+                source = "mock"
+
             self._json(
                 200,
                 {
@@ -581,6 +623,9 @@ class Handler(SimpleHTTPRequestHandler):
                     "count": len(volts),
                     "source": source,
                     "note": note,
+                    "arduinoError": arduino_error,
+                    "port": bridge.port or None,
+                    "live": source == "arduino",
                 },
             )
             return
@@ -598,14 +643,20 @@ def main() -> None:
         if GEMINI_API_KEY
         else "Gemini off (export GEMINI_API_KEY)"
     )
-    ard = f"Arduino {bridge.port}" if bridge.enabled else "Arduino off (export ARDUINO_PORT)"
+    refresh_runtime_config()
+    ard = (
+        f"Arduino {bridge.port}" + (" (auto)" if bridge.autodetected else "")
+        if bridge.enabled
+        else "Arduino off (set ARDUINO_PORT or plug in board for auto-detect)"
+    )
     print(f"Breadboard Odyssey on http://127.0.0.1:{PORT}")
     print(f"  {gem}")
     print(f"  {ard}")
+    print(f"  Mock scope fallback: {'ON' if ALLOW_MOCK_SCOPE else 'OFF (live-only when Arduino preferred)'}")
     print(f"Serving {ROOT}")
     print(f"  UI assetVersion={_asset_version('css/app.css', 'js/app.js', 'index.html')} theme=oled-black")
     print("  If the page looks stale after git pull: restart this server, then hard-refresh the browser.")
-    if bridge.enabled:
+    if PREFER_ARDUINO:
         bridge.connect()
         print(f"  Arduino status: {bridge.status()}")
     try:

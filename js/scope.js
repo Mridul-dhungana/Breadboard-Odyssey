@@ -148,6 +148,32 @@
     }
   }
 
+  function applySweep(canvas, readout, data) {
+    state.samples = data.volts || [];
+    state.source = data.source || 'mock';
+    state.lastVolts = state.samples.length ? state.samples[state.samples.length - 1] : null;
+    const color =
+      state.source === 'arduino' ? '#5ad6ff' : state.source === 'error' ? '#ff7b6b' : '#f0c45a';
+    draw(canvas, state.samples, { color });
+    if (!readout) return data;
+    if (state.source === 'error' || (data.arduinoError && !state.samples.length)) {
+      readout.textContent =
+        `LIVE FAILED · ${data.arduinoError || data.note || 'Arduino not linked'} · no fake waveform shown`;
+      readout.classList.add('error');
+      return data;
+    }
+    readout.classList.remove('error');
+    if (!state.samples.length) {
+      readout.textContent = `${state.channel} · ${state.source} · no samples`;
+      return data;
+    }
+    const avg = state.samples.reduce((a, b) => a + b, 0) / Math.max(state.samples.length, 1);
+    const tag = state.source === 'arduino' ? 'LIVE' : 'MOCK';
+    readout.textContent = `${tag} · ${state.channel} · ${state.source} · now ${state.lastVolts?.toFixed(2) ?? '—'} V · avg ${avg.toFixed(2)} V · ${state.samples.length} pts`;
+    if (data.note) readout.title = data.note;
+    return data;
+  }
+
   async function tick(canvas, readout, onUpdate) {
     if (!state.running || state.inFlight) {
       if (state.running) {
@@ -158,18 +184,13 @@
     state.inFlight = true;
     try {
       const data = await fetchSweep(state.channel, RUN_SAMPLES);
-      state.samples = data.volts || [];
-      state.source = data.source || 'mock';
-      state.lastVolts = state.samples.length ? state.samples[state.samples.length - 1] : null;
-      draw(canvas, state.samples, { color: state.source === 'arduino' ? '#5ad6ff' : '#3dff9a' });
-      if (readout) {
-        const avg =
-          state.samples.reduce((a, b) => a + b, 0) / Math.max(state.samples.length, 1);
-        readout.textContent = `${state.channel} · ${state.source} · now ${state.lastVolts?.toFixed(2) ?? '—'} V · avg ${avg.toFixed(2)} V · ${state.samples.length} pts`;
-      }
+      applySweep(canvas, readout, data);
       onUpdate?.(data);
     } catch (err) {
-      if (readout) readout.textContent = 'Scope error: ' + err.message;
+      if (readout) {
+        readout.classList.add('error');
+        readout.textContent = 'Scope error: ' + err.message;
+      }
     } finally {
       state.inFlight = false;
     }
@@ -187,14 +208,7 @@
   async function once(canvas, readout, onUpdate) {
     stop();
     const data = await fetchSweep(state.channel, ONCE_SAMPLES);
-    state.samples = data.volts || [];
-    state.source = data.source || 'mock';
-    state.lastVolts = state.samples.length ? state.samples[state.samples.length - 1] : null;
-    draw(canvas, state.samples, { color: state.source === 'arduino' ? '#5ad6ff' : '#3dff9a' });
-    if (readout) {
-      const avg = state.samples.reduce((a, b) => a + b, 0) / Math.max(state.samples.length, 1);
-      readout.textContent = `${state.channel} · ${state.source} · single · avg ${avg.toFixed(2)} V`;
-    }
+    applySweep(canvas, readout, data);
     onUpdate?.(data);
     return data;
   }

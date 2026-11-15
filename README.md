@@ -36,7 +36,7 @@ export ARDUINO_PORT=/dev/ttyACM0   # macOS: /dev/cu.usbmodem*; Windows: COM3
 python3 python/server.py
 ```
 
-Without a key/port, mock measure + local coach still work for UI demos.
+Without a Gemini key, coach falls back locally. Without an Arduino link, the scope **does not invent live-looking waveforms** (set `ALLOW_MOCK_SCOPE=1` only if you want explicit mock sweeps). Plug in the board or set `ARDUINO_PORT`, then **Reconnect Arduino** until the readout says `LIVE`.
 
 ### Arduino hardware
 
