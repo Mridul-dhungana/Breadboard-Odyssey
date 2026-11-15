@@ -4,6 +4,8 @@
   let processBusy = false;
   let chatBusy = false;
   let geminiReady = false;
+  /** Stashed LIVE capture waiting for the user to name the probe point in chat. */
+  let pendingCapture = null;
   const ANALYZE_LABEL = 'Capture + ask chat';
 
   function setMode(next) {
@@ -96,14 +98,42 @@
     updateProcessFaultButtons(wiringReady(Board.snapshot()));
   }
 
+  function focusChatInput(placeholder) {
+    const input = $('debugChatInput');
+    if (!input) return;
+    if (placeholder) input.placeholder = placeholder;
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select?.();
+    });
+  }
+
+  function attachPendingCapture(opts = {}) {
+    if (!pendingCapture) return opts;
+    const next = {
+      ...opts,
+      intent: opts.intent || 'analyze_signal',
+      channel: opts.channel || pendingCapture.channel,
+      net: opts.net ?? pendingCapture.net,
+      holes: opts.holes || pendingCapture.holes,
+      scope: opts.scope || pendingCapture.scope
+    };
+    pendingCapture = null;
+    return next;
+  }
+
   async function submitChat(userMessage, opts = {}) {
     const text = String(userMessage || '').trim();
-    if (!text && !opts.markStepsDone && !opts.scope) return;
+    // Attach a stashed capture on the next normal Send (user names the probe point).
+    // Steps done does not consume a pending capture.
+    const withCapture =
+      !opts.markStepsDone && pendingCapture && !opts.scope ? attachPendingCapture(opts) : opts;
+    if (!text && !withCapture.markStepsDone && !withCapture.scope) return;
     setChatBusy(true);
     renderChat();
     try {
       await refreshHwStatus();
-      if (!geminiReady && !opts.allowLocal) {
+      if (!geminiReady && !withCapture.allowLocal) {
         Diagnose.pushMessage(
           'assistant',
           'Gemini is not linked. Add GEMINI_API_KEY to .env (or Cloud Agent secrets), restart the server, then send again.',
@@ -114,12 +144,14 @@
       }
       const data = await Diagnose.sendChat({
         userMessage: text,
-        markStepsDone: !!opts.markStepsDone,
-        intent: opts.intent || (opts.markStepsDone ? 'steps_done' : 'chat'),
-        channel: opts.channel,
-        net: opts.net,
-        holes: opts.holes,
-        scope: opts.scope
+        markStepsDone: !!withCapture.markStepsDone,
+        intent:
+          withCapture.intent ||
+          (withCapture.scope ? 'analyze_signal' : withCapture.markStepsDone ? 'steps_done' : 'chat'),
+        channel: withCapture.channel,
+        net: withCapture.net,
+        holes: withCapture.holes,
+        scope: withCapture.scope
       });
       renderChat();
       if (data?.source === 'gemini') {
@@ -127,6 +159,7 @@
       } else if (data?.source === 'error') {
         Board.status('Coach error — see Debug chat.');
       }
+      focusChatInput("What's not working?");
     } catch (e) {
       Diagnose.pushMessage('assistant', 'Could not reach coach: ' + e.message, { source: 'error' });
       renderChat();
@@ -147,15 +180,14 @@
     if (buildBtn) {
       buildBtn.disabled = !ready || busy;
       buildBtn.title = ready
-        ? 'Open Debug, capture scope, and ask in chat'
+        ? 'Capture scope, then name the probe point in Debug chat'
         : 'Place parts so jumpers can be fitted first';
       buildBtn.textContent = processBusy ? 'Capturing…' : ANALYZE_LABEL;
     }
     if (debugBtn) {
       debugBtn.disabled = busy;
-      debugBtn.title = geminiReady
-        ? 'Capture waveform and append it to Debug chat'
-        : 'Gemini API key missing — click to see setup steps';
+      debugBtn.title =
+        'Capture a LIVE waveform, then type which point it is from in chat before Send';
       debugBtn.textContent = processBusy ? 'Capturing…' : ANALYZE_LABEL;
     }
   }
@@ -303,17 +335,6 @@
         }
         setMode('debug');
       }
-      await refreshHwStatus();
-      if (!geminiReady) {
-        Diagnose.pushMessage(
-          'assistant',
-          'Gemini is not analyzing because GEMINI_API_KEY is not set on the server. Create .env with GEMINI_API_KEY=…, restart python/server.py, then try Capture + ask chat again.',
-          { source: 'error' }
-        );
-        renderChat();
-        Board.status('Gemini unavailable — API key missing.');
-        return;
-      }
 
       const ch = $('scopeChannel').value || 'A0';
       Scope.highlightProbe(ch);
@@ -326,30 +347,31 @@
           source: 'error'
         });
         renderChat();
+        focusChatInput("What's not working?");
         return;
       }
       if (scopeData?.source !== 'arduino' || !Scope.state.samples.length) {
         Diagnose.pushMessage(
           'assistant',
-          'Need a LIVE Arduino capture before I can read the signal: ' +
+          'Need a LIVE Arduino capture: ' +
             (scopeData?.arduinoError || scopeData?.note || 'not connected') +
-            '. Pick the serial port, Reconnect Arduino, Run scope until LIVE, then try again.',
+            '. Pick the serial port, Reconnect Arduino, Run scope until LIVE, then try Capture again.',
           { source: 'error' }
         );
         renderChat();
+        focusChatInput("What's not working?");
         return;
       }
+
       const samples = Scope.state.samples || [];
       const stats = signalStats(samples);
       const step = Math.max(1, Math.floor(samples.length / 12));
       const thinSamples = samples.filter((_, i) => i % step === 0).slice(0, 12);
       const probe = Scope.holesForChannel(ch);
-      setChatBusy(true);
-      const data = await Diagnose.processFault({
+      pendingCapture = {
         channel: ch,
         net: probe.net,
         holes: probe.holes,
-        intent: 'analyze_signal',
         scope: {
           samples: thinSamples,
           sampleCount: samples.length,
@@ -359,19 +381,26 @@
           port: scopeData?.port,
           stats
         }
-      });
+      };
+
+      const statsLine = stats
+        ? ` now ${stats.last} V · avg ${stats.avg} V · pk-pk ${stats.pkpk} V`
+        : '';
+      Diagnose.pushMessage(
+        'system',
+        `Scope capture ready on ${ch}` +
+          (probe.net ? ` (hint net ${probe.net})` : '') +
+          ` ·${statsLine}. Tell me which circuit point this capture is from, then press Send — I won’t analyze until you do.`,
+        { source: 'local', kind: 'capture_pending' }
+      );
       renderChat();
-      if (data.source === 'gemini') {
-        Board.status('Scope note added to chat' + (data.model ? ` (${data.model})` : '') + '.');
-      } else {
-        Board.status('Gemini analysis failed — see Debug chat.');
-      }
+      Board.status(`Capture ready on ${ch}. Name the probe point in chat, then Send.`);
+      focusChatInput('This capture is from… (e.g. LED1 anode, OUT pin)');
     } catch (e) {
-      Diagnose.pushMessage('assistant', 'Could not analyze signal: ' + e.message, { source: 'error' });
+      Diagnose.pushMessage('assistant', 'Could not capture signal: ' + e.message, { source: 'error' });
       renderChat();
     } finally {
       processBusy = false;
-      setChatBusy(false);
       updateProcessFaultButtons(wiringReady(Board.snapshot()));
     }
   }
@@ -421,8 +450,10 @@
       });
     };
     $('debugClearChat').onclick = () => {
+      pendingCapture = null;
       Diagnose.clearChat();
       renderChat();
+      focusChatInput("What's not working?");
       Board.status('Debug chat cleared.');
     };
     Diagnose.onHistoryChange = () => {
