@@ -474,13 +474,12 @@
       if (w.error || (!drawn.has(w.key) && highlight.join() !== w.labels.join())) continue;
       const dx = x(w.b[1]) - x(w.a[1]),
         dy = y(w.b[0]) - y(w.a[0]);
-      const line = el('div', undefined, 'wire');
+      const line = el('div', undefined, 'wire' + (drawn.has(w.key) ? ' wire-on' : ' wire-ghost'));
       line.style.left = x(w.a[1]) + 'px';
       line.style.top = y(w.a[0]) - 2 + 'px';
       line.style.width = Math.hypot(dx, dy) + 'px';
       line.style.transform = 'rotate(' + Math.atan2(dy, dx) + 'rad)';
-      line.style.background = w.color;
-      line.style.opacity = drawn.has(w.key) ? '.9' : '.4';
+      line.style.setProperty('--wire', w.color);
       board.append(line);
     }
     $('parts').replaceChildren();
@@ -492,13 +491,22 @@
       drag(button, p.id);
       $('parts').append(button);
       if (q) {
+        const kindClass =
+          p.kind === 'X' ? ' ic piece-x' : p.kind === 'R' ? ' piece-r' : p.kind === 'C' ? ' piece-c' : p.kind === 'V' ? ' piece-v' : '';
+        const label =
+          p.kind === 'X'
+            ? p.id + (flipped.has(p.id) ? ' ▸' : ' ◂')
+            : p.kind === 'C'
+              ? p.id
+              : p.id;
         const chip = positioned(
-          el('button', p.id + (p.kind === 'X' ? (flipped.has(p.id) ? ' ▸' : ' ◂') : ''), 'piece' + (p.kind === 'X' ? ' ic' : '')),
+          el('button', label, 'piece' + kindClass),
           x(q.c) + (p.kind === 'X' ? 57 : q.r >= 10 ? 0 : 38),
           p.kind === 'X' ? (y(4) + y(5)) / 2 : q.r >= 10 ? (y(10) + y(11)) / 2 : y(q.r)
         );
         chip.title = p.id + ' · ' + p.value;
         if (p.kind === 'X') chip.style.width = '142px';
+        if (p.kind === 'R' || p.kind === 'C') chip.dataset.value = p.value;
         chip.setAttribute('aria-label', 'Select placed ' + p.id);
         chip.onclick = () => select(p.id);
         drag(chip, p.id);

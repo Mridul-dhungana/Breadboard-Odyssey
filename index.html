@@ -106,7 +106,10 @@
         <button type="button" id="layout" class="primary">Auto-set</button>
       </div>
       <p class="muted">Drag a part onto a hole, or select it and click a hole. In Debug, yellow holes mark the active probe points for the selected ADC channel.</p>
-      <div class="scroll"><div id="board" class="board"></div></div>
+      <div class="scroll board-stage">
+        <div class="board-stage-glow" aria-hidden="true"></div>
+        <div id="board" class="board" aria-label="Breadboard work surface"></div>
+      </div>
       <p id="status" class="status" role="status"></p>
     </section>
     <div class="reports">
