@@ -283,17 +283,21 @@
     return s;
   }
 
-  function manhattanWire(x1, y1, x2, y2) {
-    // Prefer a tidy L / Z route (matches the inspo’s right-angle jumpers).
-    if (x1 === x2 || y1 === y2) return `M ${x1} ${y1} L ${x2} ${y2}`;
+  function manhattanWire(x1, y1, x2, y2, lane = 0) {
+    // Prefer a tidy L / Z route; nudge lanes so parallel tubes don’t stack.
+    const nudge = ((lane % 5) - 2) * 4;
+    if (x1 === x2 || y1 === y2) {
+      if (x1 === x2) return `M ${x1 + nudge} ${y1} L ${x2 + nudge} ${y2}`;
+      return `M ${x1} ${y1 + nudge} L ${x2} ${y2 + nudge}`;
+    }
     const dx = Math.abs(x2 - x1);
     const dy = Math.abs(y2 - y1);
     if (dx >= dy) {
-      const mid = Math.round((x1 + x2) / 2);
-      return `M ${x1} ${y1} L ${mid} ${y1} L ${mid} ${y2} L ${x2} ${y2}`;
+      // Horizontal-first L keeps board looking like the inspo’s tidy jumpers.
+      const midY = y1;
+      return `M ${x1} ${y1} L ${x2 + nudge} ${midY} L ${x2 + nudge} ${y2}`;
     }
-    const mid = Math.round((y1 + y2) / 2);
-    return `M ${x1} ${y1} L ${x1} ${mid} L ${x2} ${mid} L ${x2} ${y2}`;
+    return `M ${x1} ${y1} L ${x1 + nudge} ${y2} L ${x2} ${y2}`;
   }
 
   function svgEl(name, attrs = {}) {
@@ -310,6 +314,7 @@
       viewBox: '0 0 696 455',
       'aria-hidden': 'true'
     });
+    let lane = 0;
     for (const w of routes) {
       if (w.error || (!drawn.has(w.key) && highlight.join() !== w.labels.join())) continue;
       const x1 = x(w.a[1]),
@@ -318,18 +323,17 @@
         y2 = y(w.b[0]);
       const hint = !drawn.has(w.key) && highlight.join() === w.labels.join();
       const g = svgEl('g', { class: hint ? 'wire-g wire-hint' : drawn.has(w.key) ? 'wire-g wire-on' : 'wire-g' });
-      const d = manhattanWire(x1, y1, x2, y2);
-      // Soft contact shadow under the tube
+      const d = manhattanWire(x1, y1, x2, y2, lane++);
       g.appendChild(
         svgEl('path', {
           class: 'wire-shadow',
           d,
           fill: 'none',
-          stroke: 'rgba(0,0,0,.28)',
-          'stroke-width': 8,
+          stroke: 'rgba(0,0,0,.22)',
+          'stroke-width': 7,
           'stroke-linecap': 'round',
           'stroke-linejoin': 'round',
-          transform: 'translate(0 2)'
+          transform: 'translate(1 2.5)'
         })
       );
       g.appendChild(
@@ -338,12 +342,27 @@
           d,
           fill: 'none',
           stroke: hint ? '#f0c020' : w.color,
-          'stroke-width': hint ? 3.5 : 6,
+          'stroke-width': hint ? 3.25 : 5.25,
           'stroke-linecap': 'round',
           'stroke-linejoin': 'round',
           'stroke-dasharray': hint ? '7 6' : 'none'
         })
       );
+      // Specular highlight down the tube
+      if (!hint) {
+        g.appendChild(
+          svgEl('path', {
+            class: 'wire-shine',
+            d,
+            fill: 'none',
+            stroke: 'rgba(255,255,255,.35)',
+            'stroke-width': 1.4,
+            'stroke-linecap': 'round',
+            'stroke-linejoin': 'round',
+            transform: 'translate(0 -1.1)'
+          })
+        );
+      }
       for (const [cx, cy] of [
         [x1, y1],
         [x2, y2]
@@ -353,10 +372,10 @@
             class: hint ? 'wire-plug wire-plug-hint' : 'wire-plug',
             cx,
             cy,
-            r: hint ? 6.5 : 5,
+            r: hint ? 6.5 : 4.6,
             fill: hint ? '#f0c020' : w.color,
-            stroke: hint ? '#ffe9a0' : 'rgba(255,255,255,.35)',
-            'stroke-width': hint ? 2 : 1
+            stroke: hint ? '#ffe9a0' : 'rgba(255,255,255,.4)',
+            'stroke-width': hint ? 2 : 1.1
           })
         );
       }

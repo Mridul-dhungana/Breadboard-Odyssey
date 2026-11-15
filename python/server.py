@@ -559,42 +559,34 @@ class Handler(SimpleHTTPRequestHandler):
                 "geminiConfigured": bool(GEMINI_API_KEY),
             }
             stage = data.get("stage")
-            # Build/debug assembly tips can be local; analysis requires Gemini.
-            if stage in ("process_fault", "investigate", "repair", "verify") or data.get("intent") == "analyze_signal":
-                gem, model, err = gemini_diagnose(data)
-                if gem:
-                    self._json(200, {"message": gem, "source": "gemini", "model": model})
-                else:
-                    reason = "no_key" if not GEMINI_API_KEY else "gemini_error"
-                    self._json(
-                        200,
-                        {
-                            "message": (
-                                "Gemini is required for signal/fault analysis. "
-                                + (
-                                    "Add GEMINI_API_KEY to .env and click Refresh links."
-                                    if reason == "no_key"
-                                    else f"Gemini call failed: {err or LAST_GEMINI_ERROR}"
-                                )
-                            ),
-                            "source": "error",
-                            "reason": reason,
-                            "error": err or LAST_GEMINI_ERROR,
-                            "detail": err or LAST_GEMINI_ERROR,
-                        },
-                    )
+            # Assembly tips stay local — Gemini only for signal/fault analysis.
+            needs_gemini = (
+                stage in ("process_fault", "investigate", "repair", "verify")
+                or data.get("intent") == "analyze_signal"
+            )
+            if not needs_gemini:
+                self._json(200, {"message": local_guide(data), "source": "local"})
                 return
             gem, model, err = gemini_diagnose(data)
             if gem:
                 self._json(200, {"message": gem, "source": "gemini", "model": model})
             else:
+                reason = "no_key" if not GEMINI_API_KEY else "gemini_error"
                 self._json(
                     200,
                     {
-                        "message": local_guide(data),
-                        "source": "local",
-                        "reason": "no_key" if not GEMINI_API_KEY else "gemini_error",
+                        "message": (
+                            "Gemini is required for signal/fault analysis. "
+                            + (
+                                "Add GEMINI_API_KEY to .env and click Refresh links."
+                                if reason == "no_key"
+                                else f"Gemini call failed: {err or LAST_GEMINI_ERROR}"
+                            )
+                        ),
+                        "source": "error",
+                        "reason": reason,
                         "error": err or LAST_GEMINI_ERROR,
+                        "detail": err or LAST_GEMINI_ERROR,
                     },
                 )
             return
