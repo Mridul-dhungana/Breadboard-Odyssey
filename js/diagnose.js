@@ -128,20 +128,29 @@
     }
   }
 
-  async function measure(net, hole, manualVolts) {
+  async function measure(net, hole, manualVolts, opts = {}) {
     const exp = expectedFor(net);
     let volts = manualVolts;
     let source = 'manual';
+    let meta = {};
     if (volts == null || Number.isNaN(volts)) {
       try {
         const res = await fetch('/api/measure', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ net, hole, fault: state.fault })
+          body: JSON.stringify({ net, hole, fault: state.fault, forceMock: !!opts.forceMock })
         });
         const data = await res.json();
         volts = data.voltage;
         source = data.source || 'mock';
+        meta = {
+          channel: data.channel,
+          arduinoError: data.arduinoError,
+          note: data.note
+        };
+        if (typeof data.ok === 'boolean') {
+          /* prefer server ok when present */
+        }
       } catch {
         // Offline fallback mirrors server mock
         const base = FAULTS[state.fault]?.offsets?.[net];
@@ -157,6 +166,7 @@
       expected: exp?.nom ?? null,
       ok: within(Number(volts), exp),
       source,
+      ...meta,
       at: new Date().toISOString()
     };
     state.readings.push(reading);
@@ -234,12 +244,14 @@
     const vcc = byNet.VCC;
     const gnd = byNet['0'];
     const out = byNet.OUT;
-    const pass =
-      state.fault === 'healthy' &&
+    const live = Object.values(byNet).some((r) => r.source === 'arduino');
+    // Live Arduino: trust measured ok flags. Mock path: also require healthy fault model.
+    const railsOk =
       vcc &&
       vcc.ok &&
       (!gnd || gnd.ok !== false) &&
       (!out || out.ok !== false || out.volts > 0.2);
+    const pass = !!railsOk && (live || state.fault === 'healthy');
     state.verified = !!pass;
     return pass;
   }

@@ -22,6 +22,11 @@
     <section>
       <h2>Coach</h2>
       <div id="coach" class="coach" role="status"></div>
+      <p id="hwStatus" class="muted" style="margin-top:10px;font-size:12px" role="status">Checking Arduino / Gemini…</p>
+      <div class="toolbar" style="margin-bottom:0">
+        <button type="button" id="refreshHw">Refresh links</button>
+        <button type="button" id="reconnectArduino">Reconnect Arduino</button>
+      </div>
     </section>
 
     <section id="panel-build">
@@ -48,13 +53,14 @@
           <select id="symptom" aria-label="Reported symptom"></select>
         </label>
         <button type="button" id="startSymptom" class="primary">Start diagnostic loop</button>
-        <p class="muted">Yellow holes are the requested probe points. Capture a mock ADC reading (or enter volts).</p>
+        <p class="muted">Yellow holes are the requested probe points. Capture reads from Arduino when connected, otherwise mock ADC (or enter volts).</p>
         <label>Manual volts (optional)
           <input id="manualVolts" type="number" step="0.01" placeholder="e.g. 0.05">
         </label>
         <div class="toolbar">
-          <button type="button" id="captureMock" class="primary">Capture mock reading</button>
+          <button type="button" id="captureMock" class="primary">Capture reading</button>
           <button type="button" id="captureManual">Use manual volts</button>
+          <button type="button" id="forceMock">Force mock</button>
         </div>
         <div id="readings" class="readings"></div>
         <button type="button" id="toRepair" disabled>Continue to Repair</button>
@@ -69,7 +75,7 @@
         <label>Mock hardware fault
           <select id="fault" aria-label="Mock fault scenario"></select>
         </label>
-        <small class="muted">Arduino UNO Q / serial measurement is stubbed. Changing the mock fault simulates the physical board.</small>
+        <small class="muted">Mock fault applies only when Arduino is offline. With a live board, fix the real wiring then Verify with Capture reading.</small>
         <div class="toolbar">
           <button type="button" id="markRepaired" class="primary">Mark repaired (set Healthy)</button>
           <button type="button" id="toVerify">Continue to Verify</button>
@@ -80,9 +86,9 @@
     <section id="panel-verify" hidden>
       <h2>Verify</h2>
       <div class="stack">
-        <p class="muted">Re-measure highlighted nets. With Mock fault = Healthy, expected rails should pass.</p>
+        <p class="muted">Re-measure highlighted nets from Arduino (or mock). Healthy rails should sit near expected voltages.</p>
         <div class="toolbar">
-          <button type="button" id="captureVerify" class="primary">Capture mock reading</button>
+          <button type="button" id="captureVerify" class="primary">Capture reading</button>
         </div>
         <div id="verifyReadings" class="readings"></div>
         <p id="verifyResult" class="status" role="status"></p>

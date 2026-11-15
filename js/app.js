@@ -120,14 +120,39 @@
     refreshCoach();
   }
 
-  async function captureReading(manual) {
+  async function refreshHwStatus() {
+    const el = $('hwStatus');
+    if (!el) return;
+    try {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+      const gem = data.gemini?.configured
+        ? `Gemini ready (${data.gemini.model})`
+        : 'Gemini off — export GEMINI_API_KEY';
+      const ard = data.arduino || {};
+      let a;
+      if (!ard.enabled) a = 'Arduino off — export ARDUINO_PORT=/dev/ttyACM0';
+      else if (ard.connected) a = `Arduino live on ${ard.port}`;
+      else a = `Arduino ${ard.port} not connected${ard.lastError ? ' (' + ard.lastError + ')' : ''}`;
+      el.textContent = gem + ' · ' + a;
+      el.className = ard.connected && data.gemini?.configured ? 'status ok' : 'muted';
+      Diagnose.hw = data;
+    } catch {
+      el.textContent = 'Server status unavailable (is python/server.py running?)';
+      el.className = 'status error';
+    }
+  }
+
+  async function captureReading(manual, forceMock = false) {
     const pending = Diagnose.state.pending;
     if (!pending) {
       Board.status('No measurement requested yet.', true);
       return;
     }
     const volts = manual ? Number($('manualVolts').value) : null;
-    const reading = await Diagnose.measure(pending.net, pending.hole, manual ? volts : null);
+    const reading = await Diagnose.measure(pending.net, pending.hole, manual ? volts : null, {
+      forceMock: !!forceMock
+    });
     updateReadings();
     updateCoach();
     Board.status(
@@ -208,9 +233,17 @@
       updateReadings();
       Board.status('Measure the highlighted hole for ' + net + '.');
     };
-    $('captureMock').onclick = () => captureReading(false);
+    $('captureMock').onclick = () => captureReading(false, false);
     $('captureManual').onclick = () => captureReading(true);
-    $('captureVerify').onclick = () => captureReading(false);
+    $('forceMock').onclick = () => captureReading(false, true);
+    $('captureVerify').onclick = () => captureReading(false, false);
+    $('refreshHw').onclick = () => refreshHwStatus();
+    $('reconnectArduino').onclick = async () => {
+      try {
+        await fetch('/api/arduino/reconnect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      } catch {}
+      await refreshHwStatus();
+    };
     $('toRepair').onclick = () => setStage('repair');
     $('markRepaired').onclick = async () => {
       Diagnose.setFault('healthy');
@@ -233,7 +266,7 @@
       if (Diagnose.state.pending && Diagnose.state.pending.hole === hole) {
         captureReading(false);
       } else if (net) {
-        Board.status('Clicked ' + hole + ' (' + net + '). Use Capture mock reading when it is the requested net.');
+        Board.status('Clicked ' + hole + ' (' + net + '). Use Capture reading when it is the requested net.');
       }
     };
   }
@@ -241,5 +274,7 @@
   Board.init();
   initUi();
   renderJourney();
+  refreshHwStatus();
   refreshCoach();
+  setInterval(refreshHwStatus, 15000);
 })();
