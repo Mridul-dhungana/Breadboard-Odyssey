@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Breadboard Odyssey local server: static files + Arduino/mock measure + Gemini/mock diagnose."""
+"""Breadboard Odyssey local server: static files + live Arduino measure + Gemini diagnose (no mocks)."""
 
 from __future__ import annotations
 
 import json
-import math
 import os
-import random
 import sys
 import time
 import urllib.error
@@ -55,19 +53,13 @@ GEMINI_MODEL_FALLBACKS: list[str] = []
 for _m in _gemini_candidates:
     if _m and _m not in GEMINI_MODEL_FALLBACKS:
         GEMINI_MODEL_FALLBACKS.append(_m)
-PREFER_ARDUINO = os.environ.get("PREFER_ARDUINO", "1").strip() not in ("0", "false", "False")
-# When Arduino is expected, never invent pretty fake scope waveforms on failure.
-ALLOW_MOCK_SCOPE = os.environ.get("ALLOW_MOCK_SCOPE", "0").strip() in ("1", "true", "True")
 ACTIVE_GEMINI_MODEL = GEMINI_MODEL
 LAST_GEMINI_ERROR: str | None = None
 
 
 def refresh_runtime_config() -> None:
     """Reload .env for Gemini + Arduino without restarting the process."""
-    global PREFER_ARDUINO, ALLOW_MOCK_SCOPE
     _load_dotenv(ROOT / ".env", override=True)
-    PREFER_ARDUINO = os.environ.get("PREFER_ARDUINO", "1").strip() not in ("0", "false", "False")
-    ALLOW_MOCK_SCOPE = os.environ.get("ALLOW_MOCK_SCOPE", "0").strip() in ("1", "true", "True")
     refresh_gemini_config()
     bridge.refresh_config()
 
@@ -104,77 +96,44 @@ EXPECTED = {
     "DISCHARGE": {"nom": 2.5, "tol": 2.5, "label": "Discharge node"},
 }
 
-FAULT_OFFSETS = {
-    "healthy": {},
-    "open_vcc": {"VCC": 0.05, "OUT": 0.02, "CTRL": 0.02, "TIMING": 0.02, "DISCHARGE": 0.02},
-    "open_gnd": {"0": 1.8, "GND": 1.8, "OUT": 1.1, "CTRL": 4.2},
-    "out_short": {"OUT": 0.04},
-    "timing_open": {"TIMING": 4.9, "OUT": 0.1},
-}
-
-
-def mock_voltage(net: str, fault: str) -> float:
-    net_u = (net or "").upper()
-    offsets = FAULT_OFFSETS.get(fault, FAULT_OFFSETS["healthy"])
-    if net_u in offsets:
-        return float(offsets[net_u])
-    base = EXPECTED.get(net_u, {}).get("nom", 0.0)
-    return round(base + random.uniform(-0.04, 0.04), 3)
-
-
-def measure_voltage(net: str, fault: str, force_mock: bool = False) -> dict:
+def measure_voltage(net: str) -> dict:
+    """Live Arduino ADC only — never invents voltages."""
     net_u = str(net or "VCC").upper()
-    if PREFER_ARDUINO and bridge.enabled and not force_mock:
-        try:
-            volts = bridge.read_voltage(net_u)
-            exp = EXPECTED.get(net_u)
-            ok = None
-            if exp:
-                ok = abs(volts - exp["nom"]) <= exp["tol"]
-            return {
-                "voltage": round(float(volts), 3),
-                "net": net_u,
-                "channel": bridge.channel_for_net(net_u),
-                "source": "arduino",
-                "ok": ok,
-                "expected": exp,
-                "note": f"Live reading from {bridge.port}",
-            }
-        except Exception as exc:  # noqa: BLE001
-            # Fall through to mock but report the Arduino error
-            mock = mock_voltage(net_u, fault)
-            exp = EXPECTED.get(net_u)
-            return {
-                "voltage": mock,
-                "net": net_u,
-                "source": "mock",
-                "fallbackFrom": "arduino",
-                "arduinoError": str(exc),
-                "ok": abs(mock - exp["nom"]) <= exp["tol"] if exp else None,
-                "expected": exp,
-                "note": "Arduino read failed; returned mock voltage.",
-            }
-    volts = mock_voltage(net_u, fault)
     exp = EXPECTED.get(net_u)
-    return {
-        "voltage": volts,
-        "net": net_u,
-        "source": "mock",
-        "ok": abs(volts - exp["nom"]) <= exp["tol"] if exp else None,
-        "expected": exp,
-        "note": "Mock ADC (set ARDUINO_PORT for live Uno Q readings).",
-    }
+    try:
+        if not bridge.enabled:
+            raise RuntimeError(
+                "No Arduino port. Set ARDUINO_PORT or plug in the board and Reconnect."
+            )
+        volts = bridge.read_voltage(net_u)
+        ok = abs(volts - exp["nom"]) <= exp["tol"] if exp else None
+        return {
+            "voltage": round(float(volts), 3),
+            "net": net_u,
+            "channel": bridge.channel_for_net(net_u),
+            "source": "arduino",
+            "ok": ok,
+            "expected": exp,
+            "note": f"Live reading from {bridge.port}",
+            "live": True,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "voltage": None,
+            "net": net_u,
+            "source": "error",
+            "arduinoError": str(exc),
+            "ok": None,
+            "expected": exp,
+            "note": f"Arduino read failed: {exc}",
+            "live": False,
+        }
 
 
-def mock_diagnose(payload: dict) -> str:
+def local_guide(payload: dict) -> str:
+    """Assembly / UI guidance only (not a fake measurement or fault diagnosis)."""
     stage = payload.get("stage")
-    pending = payload.get("pending") or {}
-    readings = payload.get("readings") or []
-    last = payload.get("lastReading") or (readings[-1] if readings else None)
     circuit = payload.get("circuit") or {}
-    symptom = payload.get("symptom") or {}
-    fault = payload.get("fault")
-
     if stage == "build":
         if not circuit.get("hasTimer"):
             return "Import the 555 timer netlist so TIMER_DEMO is on the tray."
@@ -182,75 +141,15 @@ def mock_diagnose(payload: dict) -> str:
             return "Place every part (Auto-set is fine), then draw the suggested jumpers."
         if not circuit.get("allJumpersDrawn"):
             return "Add the remaining suggested jumpers to close the nets."
-        return "Assembly looks ready. Move to Investigate and pick a symptom."
-
-    if stage == "investigate":
-        if not symptom:
-            return "Choose a symptom to start the closed measurement loop."
-        if pending and not last:
-            hole = pending.get("hole")
-            net = pending.get("net")
-            exp = (pending.get("expected") or {}).get("nom")
-            return f"Probe {hole} on net {net}. Expect about {exp} V on a healthy TIMER_DEMO."
-        if last:
-            net = last.get("net")
-            volts = float(last.get("volts", 0))
-            ok = last.get("ok")
-            src = last.get("source", "mock")
-            prefix = f"[{src}] "
-            if net == "VCC" and ok is False:
-                return (
-                    f"{prefix}VCC measured {volts:.2f} V instead of ~5 V. "
-                    "Likely an open supply jumper or unpowered rail — go to Repair."
-                )
-            if net in ("0", "GND") and ok is False:
-                return f"{prefix}Ground is {volts:.2f} V. Check the ground return jumper and supply − rail."
-            if ok:
-                return f"{prefix}{net} looks plausible at {volts:.2f} V. Continue to the next highlighted net."
-            return f"{prefix}{net} is off at {volts:.2f} V versus the expected rail. Use that in Repair."
-        return "Capture the highlighted measurement."
-
-    if stage == "repair":
-        if fault == "healthy":
-            return "Fault cleared. Re-measure with Arduino (or mock) in Verify."
-        return (
-            f"Active mock fault is '{fault}' (used only when Arduino is offline). "
-            "Fix the matching jumper/short on the physical board, then Verify with a live reading."
-        )
-
-    if stage == "verify":
-        return "Re-measure VCC, OUT, and CTRL. Healthy rails should sit near expected values."
-
+        return "Assembly looks ready. Open Debug and capture a LIVE Arduino scope sweep."
     if stage == "debug":
         ch = payload.get("channel") or "A0"
         net = payload.get("net") or "VCC"
-        return f"Scope {ch} on net {net}. Yellow holes are the probe points — run the scope to watch the waveform."
-
-    if stage == "process_fault":
-        scope = payload.get("scope") or {}
-        last = payload.get("lastReading") or (readings[-1] if readings else None)
-        fault = payload.get("fault") or "open_vcc"
-        stats = scope.get("stats") or {}
-        volts = scope.get("lastVolts")
-        if volts is None and last:
-            volts = last.get("volts")
-        ch = payload.get("channel") or "A0"
-        if stats:
-            volt_txt = (
-                f"{ch} avg {stats.get('avg')} V, pk-pk {stats.get('pkpk')} V "
-                f"(min {stats.get('min')}, max {stats.get('max')})"
-            )
-        elif volts is not None:
-            volt_txt = f"{float(volts):.2f} V on {ch}"
-        else:
-            volt_txt = "no scope capture yet"
         return (
-            f"Mock signal analysis for fault '{fault}': {volt_txt}. "
-            "Check VCC and GND jumpers first, then OUT/TIMING. "
-            "Set GEMINI_API_KEY for a live Gemini analysis."
+            f"Probe {ch} (net {net}). Connect Arduino, Run scope until readout says LIVE, "
+            "then Analyze signal with Gemini."
         )
-
-    return "Build the circuit, then open Debug for the A0 scope."
+    return "Connect Arduino + Gemini for live capture and analysis. No simulated data is used."
 
 
 def _format_http_error(exc: urllib.error.HTTPError) -> str:
@@ -318,7 +217,7 @@ def gemini_diagnose(payload: dict) -> tuple[str | None, str | None, str | None]:
             "(1) what the signal suggests (healthy rail, open supply, stuck output, oscillating, noise, etc.),\n"
             "(2) most likely fault in one short sentence,\n"
             "(3) 2-4 concrete next repair/probe steps (net/hole/jumper).\n"
-            "If scope source is arduino, treat volts as physical truth; if mock, say so briefly. "
+            "Treat scope volts as physical Arduino truth only (source must be arduino). "
             "No markdown headings. Short plain sentences or a compact numbered list.\n\n"
             f"Expected rails (nom/tol):\n{json.dumps(expected_block, indent=2)}\n\n"
             f"Session context:\n{json.dumps(ctx, indent=2)}\n"
@@ -329,10 +228,9 @@ def gemini_diagnose(payload: dict) -> tuple[str | None, str | None, str | None]:
             "You are an electronics lab coach for Breadboard Odyssey.\n"
             "Circuit: 555 TIMER_DEMO on a solderless breadboard (wiring fixture — not a SPICE model).\n"
             "Hardware: optional Arduino UNO Q measuring ADC channels mapped to nets.\n"
-            "Job: interpret the latest voltage reading vs expected rails and give ONE clear next action "
+            "Job: interpret the latest LIVE Arduino voltage vs expected rails and give ONE clear next action "
             "(which net/hole to probe next, which jumper to fix, or verify). "
-            "If source is arduino, treat the volts as physical truth. "
-            "If source is mock, say so briefly. 1-3 short sentences. No markdown, no bullet lists.\n\n"
+            "Treat volts as physical truth. 1-3 short sentences. No markdown, no bullet lists.\n\n"
             f"Expected rails (nom/tol):\n{json.dumps(expected_block, indent=2)}\n\n"
             f"Session context:\n{json.dumps(ctx, indent=2)}\n"
         )
@@ -464,8 +362,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path == "/api/status":
             refresh_runtime_config()
-            if PREFER_ARDUINO:
-                bridge.connect()
+            bridge.connect()
             self._json(
                 200,
                 {
@@ -476,8 +373,9 @@ class Handler(SimpleHTTPRequestHandler):
                         "lastError": LAST_GEMINI_ERROR,
                     },
                     "arduino": bridge.status(),
-                    "preferArduino": PREFER_ARDUINO,
-                    "allowMockScope": ALLOW_MOCK_SCOPE,
+                    "preferArduino": True,
+                    "allowMockScope": False,
+                    "mockEnabled": False,
                     "expected": EXPECTED,
                     "ui": {
                         "root": str(ROOT),
@@ -500,38 +398,54 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/api/measure":
             data = self._read_json()
             net = str(data.get("net", "VCC")).upper()
-            fault = str(data.get("fault", "healthy"))
-            force_mock = bool(data.get("forceMock"))
-            result = measure_voltage(net, fault, force_mock=force_mock)
+            result = measure_voltage(net)
             result["hole"] = data.get("hole")
-            result["fault"] = fault
             self._json(200, result)
             return
         if self.path == "/api/diagnose":
             data = self._read_json()
             refresh_runtime_config()
-            # Enrich with live hardware status so Gemini knows what's real
             data["hardware"] = {
                 "arduino": bridge.status(),
                 "geminiConfigured": bool(GEMINI_API_KEY),
             }
+            stage = data.get("stage")
+            # Build/debug assembly tips can be local; analysis requires Gemini.
+            if stage in ("process_fault", "investigate", "repair", "verify") or data.get("intent") == "analyze_signal":
+                gem, model, err = gemini_diagnose(data)
+                if gem:
+                    self._json(200, {"message": gem, "source": "gemini", "model": model})
+                else:
+                    reason = "no_key" if not GEMINI_API_KEY else "gemini_error"
+                    self._json(
+                        200,
+                        {
+                            "message": (
+                                "Gemini is required for signal/fault analysis. "
+                                + (
+                                    "Add GEMINI_API_KEY to .env and click Refresh links."
+                                    if reason == "no_key"
+                                    else f"Gemini call failed: {err or LAST_GEMINI_ERROR}"
+                                )
+                            ),
+                            "source": "error",
+                            "reason": reason,
+                            "error": err or LAST_GEMINI_ERROR,
+                            "detail": err or LAST_GEMINI_ERROR,
+                        },
+                    )
+                return
             gem, model, err = gemini_diagnose(data)
             if gem:
                 self._json(200, {"message": gem, "source": "gemini", "model": model})
             else:
-                reason = "no_key" if not GEMINI_API_KEY else "gemini_error"
                 self._json(
                     200,
                     {
-                        "message": mock_diagnose(data),
-                        "source": "mock",
-                        "reason": reason,
+                        "message": local_guide(data),
+                        "source": "local",
+                        "reason": "no_key" if not GEMINI_API_KEY else "gemini_error",
                         "error": err or LAST_GEMINI_ERROR,
-                        "detail": (
-                            "Add GEMINI_API_KEY to .env or Cursor environment secrets, then click Refresh links."
-                            if reason == "no_key"
-                            else (err or "Gemini API call failed")
-                        ),
                     },
                 )
             return
@@ -555,8 +469,6 @@ class Handler(SimpleHTTPRequestHandler):
             data = self._read_json()
             channel = str(data.get("channel", "A0")).upper()
             count = max(8, min(int(data.get("samples", 40)), 200))
-            force_mock = bool(data.get("forceMock"))
-            # Map channel → net using bridge defaults
             net = None
             for n, ch in bridge.net_map.items():
                 if ch == channel:
@@ -566,53 +478,28 @@ class Handler(SimpleHTTPRequestHandler):
                 net = {"A0": "VCC", "A1": "0", "A2": "OUT", "A3": "CTRL", "A4": "TIMING", "A5": "DISCHARGE"}.get(
                     channel, "VCC"
                 )
-            fault = str(data.get("fault", "healthy"))
             volts: list[float] = []
-            source = "mock"
+            source = "error"
             note = ""
             arduino_error = None
-            want_live = PREFER_ARDUINO and not force_mock
-
-            if want_live:
-                try:
-                    if not bridge.enabled:
-                        raise RuntimeError(
-                            "No Arduino port found. Set ARDUINO_PORT in .env (e.g. /dev/ttyACM0 or COM3) "
-                            "or plug in the board and click Reconnect Arduino."
-                        )
-                    if not bridge.connect():
-                        raise RuntimeError(bridge.last_error or "not connected")
-                    volts = [round(v, 3) for v in bridge.read_sweep(channel, count, net=net)]
-                    if not volts:
-                        raise RuntimeError("Arduino returned an empty sweep")
-                    source = "arduino"
-                    note = f"Live sweep from {bridge.port} {channel}"
-                except Exception as exc:  # noqa: BLE001
-                    arduino_error = str(exc)
-                    note = f"Arduino sweep failed: {exc}"
-                    source = "error"
-                    volts = []
-                    # Only invent waveforms when explicitly allowed — never silently.
-                    if ALLOW_MOCK_SCOPE or force_mock:
-                        source = "mock"
-                        note = f"MOCK waveform (Arduino failed: {exc})"
-
-            if source == "mock" and not volts and (force_mock or ALLOW_MOCK_SCOPE or not want_live):
-                base = mock_voltage(net, fault)
-                for i in range(count):
-                    if channel == "A2" or net == "OUT":
-                        phase = math.sin(2 * math.pi * 8 * (i / count))
-                        v = 4.8 if phase >= 0 else 0.2
-                        v += random.uniform(-0.05, 0.05)
-                    elif channel in ("A4",) or net == "TIMING":
-                        v = 1.6 + 1.7 * (0.5 + 0.5 * math.sin(2 * math.pi * 3 * (i / count)))
-                        v += random.uniform(-0.04, 0.04)
-                    else:
-                        v = base + random.uniform(-0.03, 0.03)
-                    volts.append(round(max(0.0, min(5.2, v)), 3))
-                if not note:
-                    note = "Mock scope sweep (Arduino not linked — set ARDUINO_PORT for live A0)"
-                source = "mock"
+            try:
+                if not bridge.enabled:
+                    raise RuntimeError(
+                        "No Arduino port found. Set ARDUINO_PORT in .env (e.g. /dev/ttyACM0 or COM3) "
+                        "or plug in the board and click Reconnect Arduino."
+                    )
+                if not bridge.connect():
+                    raise RuntimeError(bridge.last_error or "not connected")
+                volts = [round(v, 3) for v in bridge.read_sweep(channel, count, net=net)]
+                if not volts:
+                    raise RuntimeError("Arduino returned an empty sweep")
+                source = "arduino"
+                note = f"Live sweep from {bridge.port} {channel}"
+            except Exception as exc:  # noqa: BLE001
+                arduino_error = str(exc)
+                note = f"Arduino sweep failed: {exc}"
+                source = "error"
+                volts = []
 
             self._json(
                 200,
@@ -652,13 +539,12 @@ def main() -> None:
     print(f"Breadboard Odyssey on http://127.0.0.1:{PORT}")
     print(f"  {gem}")
     print(f"  {ard}")
-    print(f"  Mock scope fallback: {'ON' if ALLOW_MOCK_SCOPE else 'OFF (live-only when Arduino preferred)'}")
+    print("  Mode: LIVE ONLY (mock measure/scope/coach disabled)")
     print(f"Serving {ROOT}")
     print(f"  UI assetVersion={_asset_version('css/app.css', 'js/app.js', 'index.html')} theme=oled-black")
     print("  If the page looks stale after git pull: restart this server, then hard-refresh the browser.")
-    if PREFER_ARDUINO:
-        bridge.connect()
-        print(f"  Arduino status: {bridge.status()}")
+    bridge.connect()
+    print(f"  Arduino status: {bridge.status()}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

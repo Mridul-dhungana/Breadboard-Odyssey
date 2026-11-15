@@ -1,4 +1,4 @@
-/* Closed-loop diagnostics for TIMER_DEMO (expected rails/nets + Gemini/mock coach). */
+/* Live diagnostics for TIMER_DEMO — Arduino measure + Gemini coach only (no mocks). */
 (function (global) {
   const EXPECTED = {
     VCC: { nom: 5.0, tol: 0.4, label: 'Supply rail' },
@@ -16,20 +16,11 @@
     { id: 'no_power', label: 'Board seems unpowered', firstNet: 'VCC' }
   ];
 
-  const FAULTS = {
-    healthy: { label: 'Healthy (mock)', offsets: {} },
-    open_vcc: { label: 'Open VCC jumper (mock)', offsets: { VCC: 0.05, OUT: 0.02, CTRL: 0.02, TIMING: 0.02, DISCHARGE: 0.02 } },
-    open_gnd: { label: 'Open ground return (mock)', offsets: { '0': 1.8, OUT: 1.1, CTRL: 4.2 } },
-    out_short: { label: 'OUT shorted to GND (mock)', offsets: { OUT: 0.04 } },
-    timing_open: { label: 'Timing cap open (mock)', offsets: { TIMING: 4.9, OUT: 0.1 } }
-  };
-
   const state = {
-    stage: 'build', // build | investigate | repair | verify
+    stage: 'build',
     symptom: null,
-    fault: 'open_vcc',
     readings: [],
-    pending: null, // { net, hole, expected }
+    pending: null,
     repairDone: false,
     verified: false,
     coach: 'Import the 555 timer netlist, auto-set or place parts, then add suggested jumpers.',
@@ -46,45 +37,17 @@
   }
 
   function localCoach(ctx) {
-    const { stage, pending, lastReading, snap, symptom } = ctx;
+    const { stage, snap } = ctx;
     if (stage === 'build') {
       if (!snap.hasTimer) return 'Load the 555 timer example, then place every part and draw the suggested jumpers.';
-      if (!snap.allPlaced) return 'Place all parts on the board (Auto-set is fine for the demo).';
+      if (!snap.allPlaced) return 'Place all parts on the board (Auto-set is fine).';
       if (!snap.allJumpersDrawn) return 'Add every suggested jumper so the nets are connected.';
-      return 'Build looks complete. Advance to Investigate and report a symptom.';
+      return 'Build looks complete. Open Debug, connect Arduino for LIVE scope, then Analyze with Gemini.';
     }
-    if (stage === 'investigate') {
-      if (!symptom) return 'Pick a symptom to start the measurement loop.';
-      if (pending && !lastReading) {
-        return `Probe ${pending.hole} on net ${pending.net}. Expected about ${pending.expected.nom.toFixed(2)} V (${pending.expected.label}).`;
-      }
-      if (lastReading) {
-        const ok = within(lastReading.volts, expectedFor(lastReading.net));
-        if (lastReading.net === 'VCC' && !ok) {
-          return `VCC read ${lastReading.volts.toFixed(2)} V — far from 5 V. Likely an open supply jumper or unpowered rail. Move to Repair.`;
-        }
-        if (lastReading.net === '0' && !ok) {
-          return `Ground read ${lastReading.volts.toFixed(2)} V. Check the ground return jumper and supply − rail.`;
-        }
-        if (lastReading.net === 'OUT' && lastReading.volts < 0.3) {
-          return 'OUT is stuck near 0 V. Confirm VCC/GND first, then look for a short on the output net.';
-        }
-        if (ok) {
-          return `${lastReading.net} looks plausible at ${lastReading.volts.toFixed(2)} V. Capture the next highlighted net or continue diagnosing.`;
-        }
-        return `${lastReading.net} is off (${lastReading.volts.toFixed(2)} V vs ~${expectedFor(lastReading.net)?.nom ?? '?'} V). Use that clue in Repair.`;
-      }
-      return 'Capture the highlighted measurement to continue.';
+    if (stage === 'debug' || stage === 'investigate') {
+      return 'Connect Arduino, Run scope until readout says LIVE, then Analyze signal with Gemini.';
     }
-    if (stage === 'repair') {
-      if (state.fault === 'healthy') return 'Fault cleared in the mock. Re-measure in Verify.';
-      return `Mock fault: ${FAULTS[state.fault]?.label || state.fault}. Apply the suggested fix (or set fault to Healthy), then Verify.`;
-    }
-    if (stage === 'verify') {
-      if (state.verified) return 'Verify passed — supply and key nets match expected rails for TIMER_DEMO.';
-      return 'Re-measure VCC and OUT (and CTRL if needed). Healthy mock readings should land near expected rails.';
-    }
-    return 'Follow the journey stages.';
+    return 'Live Arduino + Gemini only — no simulated measurements.';
   }
 
   async function askCoach(extra = {}) {
@@ -92,7 +55,6 @@
     const payload = {
       stage: state.stage,
       symptom: state.symptom,
-      fault: state.fault,
       pending: state.pending,
       readings: state.readings,
       circuit: {
@@ -121,7 +83,7 @@
       if (!res.ok) throw new Error('diagnose failed');
       const data = await res.json();
       state.coach = data.message || fallback;
-      state.coachSource = data.source || 'mock';
+      state.coachSource = data.source || 'local';
       return data;
     } catch {
       state.coach = fallback;
@@ -130,36 +92,28 @@
     }
   }
 
-  async function measure(net, hole, manualVolts, opts = {}) {
+  async function measure(net, hole, manualVolts) {
     const exp = expectedFor(net);
     let volts = manualVolts;
     let source = 'manual';
     let meta = {};
     if (volts == null || Number.isNaN(volts)) {
-      try {
-        const res = await fetch('/api/measure', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ net, hole, fault: state.fault, forceMock: !!opts.forceMock })
-        });
-        const data = await res.json();
-        volts = data.voltage;
-        source = data.source || 'mock';
-        meta = {
-          channel: data.channel,
-          arduinoError: data.arduinoError,
-          note: data.note
-        };
-        if (typeof data.ok === 'boolean') {
-          /* prefer server ok when present */
-        }
-      } catch {
-        // Offline fallback mirrors server mock
-        const base = FAULTS[state.fault]?.offsets?.[net];
-        volts = base != null ? base : exp?.nom ?? 0;
-        if (base == null && exp) volts = exp.nom + (Math.random() - 0.5) * 0.08;
-        source = 'local-mock';
+      const res = await fetch('/api/measure', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ net, hole })
+      });
+      const data = await res.json();
+      if (data.source !== 'arduino' || data.voltage == null) {
+        throw new Error(data.arduinoError || data.note || 'Arduino measure failed');
       }
+      volts = data.voltage;
+      source = 'arduino';
+      meta = {
+        channel: data.channel,
+        note: data.note,
+        live: true
+      };
     }
     const reading = {
       net,
@@ -187,7 +141,7 @@
 
   function nextNetAfter(reading) {
     if (!reading) return 'VCC';
-    if (reading.net === 'VCC' && reading.ok === false) return null; // go repair
+    if (reading.net === 'VCC' && reading.ok === false) return null;
     if (reading.net === 'VCC') return '0';
     if (reading.net === '0') return 'OUT';
     if (reading.net === 'OUT') return 'CTRL';
@@ -198,7 +152,7 @@
   function suggestRepair() {
     const last = state.readings[state.readings.length - 1];
     if (!last) {
-      return { title: 'No readings yet', steps: ['Return to Investigate and capture VCC.'] };
+      return { title: 'No live readings yet', steps: ['Capture a LIVE Arduino reading on VCC.'] };
     }
     if (last.net === 'VCC' && !last.ok) {
       return {
@@ -206,7 +160,7 @@
         steps: [
           'Confirm the DC supply part sits on the top + / − rails.',
           'Add the red VCC jumper from the supply strip to the IC VCC net.',
-          'In this demo, set Mock fault → Healthy after “fixing”, then Verify.'
+          'Re-measure VCC live from Arduino.'
         ]
       };
     }
@@ -216,7 +170,7 @@
         steps: [
           'Check the blue ground jumper to the IC GND pin.',
           'Ensure the supply − lead is on the top − rail.',
-          'Set Mock fault → Healthy, then Verify.'
+          'Re-measure ground live from Arduino.'
         ]
       };
     }
@@ -226,7 +180,7 @@
         steps: [
           'Inspect OUT wiring for an accidental short to ground.',
           'Confirm RESET is tied to VCC in the TIMER_DEMO fixture.',
-          'Set Mock fault → Healthy, then Verify.'
+          'Re-measure OUT live from Arduino.'
         ]
       };
     }
@@ -235,45 +189,27 @@
       steps: [
         'Revisit jumpers for VCC, GND, TIMING, and OUT.',
         'Reseat the NE555P profile (XU1) if pins look misaligned.',
-        'Set Mock fault → Healthy for a clean verify pass.'
+        'Use Analyze signal with Gemini on a LIVE capture.'
       ]
     };
   }
 
   function evaluateVerify() {
     const byNet = {};
-    for (const r of state.readings) byNet[r.net] = r;
+    for (const r of state.readings) {
+      if (r.source === 'arduino') byNet[r.net] = r;
+    }
     const vcc = byNet.VCC;
     const gnd = byNet['0'];
     const out = byNet.OUT;
-    const live = Object.values(byNet).some((r) => r.source === 'arduino');
-    // Live Arduino: trust measured ok flags. Mock path: also require healthy fault model.
     const railsOk =
       vcc &&
       vcc.ok &&
       (!gnd || gnd.ok !== false) &&
       (!out || out.ok !== false || out.volts > 0.2);
-    const pass = !!railsOk && (live || state.fault === 'healthy');
+    const pass = !!railsOk;
     state.verified = !!pass;
     return pass;
-  }
-
-  function localProcessFault(ctx) {
-    const repair = suggestRepair();
-    const scope = ctx.scope || {};
-    const last = state.readings[state.readings.length - 1];
-    const faultLabel = FAULTS[state.fault]?.label || state.fault;
-    const volts =
-      scope.lastVolts != null
-        ? `${Number(scope.lastVolts).toFixed(2)} V on ${ctx.channel || 'A0'}`
-        : last
-          ? `${last.volts.toFixed(2)} V on ${last.net}`
-          : 'no capture yet';
-    return (
-      `Likely issue: ${faultLabel}. Latest reading ${volts}. ` +
-      `${repair.title}: ${repair.steps.slice(0, 2).join(' ')} ` +
-      '(Set GEMINI_API_KEY for a live Gemini diagnosis.)'
-    );
   }
 
   async function processFault(extra = {}) {
@@ -283,7 +219,6 @@
       stage: 'process_fault',
       intent: extra.intent || 'analyze_signal',
       symptom: state.symptom,
-      fault: state.fault,
       readings: state.readings,
       circuit: {
         hasTimer: snap.hasTimer,
@@ -296,7 +231,6 @@
       },
       ...extra
     };
-    const fallback = localProcessFault(extra);
     try {
       const res = await fetch('/api/diagnose', {
         method: 'POST',
@@ -305,20 +239,19 @@
       });
       if (!res.ok) throw new Error('diagnose failed (' + res.status + ')');
       const data = await res.json();
-      state.coach = data.message || fallback;
-      state.coachSource = data.source || 'mock';
+      state.coach = data.message || 'Gemini returned no analysis.';
+      state.coachSource = data.source || 'error';
       return data;
     } catch (err) {
       const message = 'Gemini request failed: ' + (err?.message || 'network error');
       state.coach = message;
-      state.coachSource = 'local';
-      return { message, source: 'local', reason: 'network_error', error: String(err?.message || err) };
+      state.coachSource = 'error';
+      return { message, source: 'error', reason: 'network_error', error: String(err?.message || err) };
     }
   }
 
   global.Diagnose = {
     SYMPTOMS,
-    FAULTS,
     EXPECTED,
     state,
     askCoach,
@@ -333,8 +266,8 @@
     setStage(stage) {
       state.stage = stage;
     },
-    setFault(fault) {
-      state.fault = fault;
+    setFault() {
+      /* mock fault model removed — live hardware only */
     },
     setSymptom(symptomId) {
       state.symptom = SYMPTOMS.find((s) => s.id === symptomId) || null;

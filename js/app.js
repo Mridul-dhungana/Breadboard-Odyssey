@@ -39,12 +39,12 @@
     if (src === 'gemini') {
       badge.className = 'badge live';
       badge.textContent = 'Gemini';
-    } else if (src === 'local') {
+    } else if (src === 'error') {
+      badge.className = 'badge off';
+      badge.textContent = 'Error';
+    } else {
       badge.className = 'badge';
       badge.textContent = 'Local';
-    } else {
-      badge.className = 'badge mock';
-      badge.textContent = 'Mock coach';
     }
     tag.append(badge);
     const body = document.createElement('div');
@@ -239,21 +239,13 @@
         updateCoach('Could not capture scope signal: ' + e.message, 'local', 'error');
         return;
       }
-      if (scopeData?.source === 'error' || (scopeData?.live === false && scopeData?.arduinoError)) {
+      if (scopeData?.source !== 'arduino' || !Scope.state.samples.length) {
         updateCoach(
-          'Cannot analyze live signal — Arduino is not providing data: ' +
-            (scopeData.arduinoError || scopeData.note || 'not connected') +
-            '. Pick the serial port, click Reconnect Arduino, then try again.',
-          'local',
+          'Cannot analyze — need a LIVE Arduino capture: ' +
+            (scopeData?.arduinoError || scopeData?.note || 'not connected') +
+            '. Pick the serial port, click Reconnect Arduino, Run scope until LIVE, then try again.',
+          'error',
           'error'
-        );
-        return;
-      }
-      if (scopeData?.source === 'mock') {
-        updateCoach(
-          'Scope is still on MOCK data, not the Arduino. Connect the board (ARDUINO_PORT / Reconnect), confirm readout says LIVE, then analyze again.',
-          'local',
-          'warn'
         );
         return;
       }
@@ -284,7 +276,7 @@
         updateCoach(
           (data.message || 'Gemini did not return an analysis.') +
             ` [reason: ${reason}${detail ? ' — ' + detail : ''}]`,
-          data.source || 'mock',
+          'error',
           'error'
         );
         Board.status('Gemini analysis failed — see Coach.');

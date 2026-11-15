@@ -159,7 +159,6 @@ a{color:var(--accent)}
   display:inline-block;padding:2px 8px;border-radius:6px;
   border:1px solid var(--line-strong);font-size:10px;letter-spacing:.04em;
 }
-.badge.mock{border-color:#6a5720;color:var(--warn);background:#1a1508}
 .badge.live{border-color:#1f5a40;color:var(--ok);background:#0b1812}
 .badge.off{border-color:#5a2a24;color:var(--danger);background:#180c0b}
 .scope-panel{display:grid;gap:8px}

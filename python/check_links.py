@@ -76,7 +76,7 @@ def check_gemini() -> dict:
 
 def check_arduino() -> dict:
     if not bridge.enabled:
-        return {"ok": False, "detail": "ARDUINO_PORT not set — mock measure will be used"}
+        return {"ok": False, "detail": "ARDUINO_PORT not set — live measure unavailable"}
     if not bridge.connect():
         return {"ok": False, "detail": bridge.last_error or "connect failed"}
     try:
@@ -101,7 +101,7 @@ def main() -> int:
     if g["ok"] or a["ok"]:
         print("Ready for live demo on whichever link is OK.")
     else:
-        print("Both links offline — server still runs with mock measure + local coach.")
+        print("Both links offline — scope/measure/analyze will error until Arduino + Gemini are linked.")
     return 0 if g["ok"] else 1
 
 
