@@ -2,7 +2,7 @@
 
 Hackathon MVP: assemble a **555 timer** breadboard circuit from a SPICE-like netlist, then diagnose it with **live Arduino ADC** + **Gemini**.
 
-Modes: **Build** the 555 (or divider), then **Debug** with an **A0 oscilloscope** and yellow probe points on the breadboard.
+Modes: **Build** the 555, divider, or dual-LED demo, then **Debug** with an **A0 oscilloscope** and yellow probe points on the breadboard.
 
 **Standout loop:** place circuit → Debug → LIVE Arduino scope sweep → **Analyze signal with Gemini**.
 
@@ -68,6 +68,7 @@ The Coach panel shows live link status. Pick a serial port (or Auto-detect) → 
 | Piece | Behavior |
 | --- | --- |
 | `TIMER_DEMO` / NE555 | Wiring/interface profile only — **no behavioral SPICE** |
+| Diodes / LEDs (`D` + `.MODEL … D`) | Wiring only — anode/cathode on the board |
 | Voltages / scope | **Arduino only** — errors if not linked |
 | Gemini | **Required** for signal/fault analysis |
 | Auto-routing / camera / auth / DB | Out of scope |
