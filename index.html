@@ -70,13 +70,14 @@
       <nav>
         <button type="button" id="divider">Divider</button>
         <button type="button" id="timer">555 timer</button>
+        <button type="button" id="leds">Dual LEDs</button>
       </nav>
       <textarea aria-label="SPICE netlist" id="source" rows="9" spellcheck="false"></textarea>
       <div class="toolbar">
         <button type="button" id="import" class="primary">Import netlist</button>
       </div>
       <p id="importMessage" class="status" role="status"></p>
-      <small>Supports R, C, DC voltage sources and one named NE555 terminal profile (TIMER_DEMO — interface only).</small>
+      <small>Supports R, C, D (with .MODEL … D), DC voltage sources, .op, and one named NE555 terminal profile (TIMER_DEMO — interface only).</small>
       <h2 style="margin-top:14px">Checklist</h2>
       <ul id="buildChecklist" class="stack"></ul>
       <div class="toolbar" style="margin-bottom:0">

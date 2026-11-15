@@ -3,7 +3,8 @@
   const $ = (id) => document.getElementById(id);
   const examples = {
     divider: '* 3.3 V divider\nV1 VIN 0 DC 3.3\nR1 VIN OUT 1k\nR2 OUT 0 1k\n.end',
-    timer: '* 555 astable wiring example\nV1 VCC 0 DC 5\nR1 VCC DISCHARGE 10k\nR2 DISCHARGE TIMING 10k\nC1 TIMING 0 10u\nC2 CTRL 0 10n\nXU1 VCC 0 TIMING TIMING DISCHARGE CTRL OUT VCC TIMER_DEMO\n* Interface declaration only\n.SUBCKT TIMER_DEMO VCC GND TRIG THRES DISCH CONT OUT RESET\n.ENDS TIMER_DEMO\n.end'
+    timer: '* 555 astable wiring example\nV1 VCC 0 DC 5\nR1 VCC DISCHARGE 10k\nR2 DISCHARGE TIMING 10k\nC1 TIMING 0 10u\nC2 CTRL 0 10n\nXU1 VCC 0 TIMING TIMING DISCHARGE CTRL OUT VCC TIMER_DEMO\n* Interface declaration only\n.SUBCKT TIMER_DEMO VCC GND TRIG THRES DISCH CONT OUT RESET\n.ENDS TIMER_DEMO\n.end',
+    leds: '* 5 V, two LED branches\nV1 VCC 0 DC 5\nR1 VCC LED1_A 330\nD1 LED1_A 0 RED_LED\nR2 VCC LED2_A 330\nD2 LED2_A 0 RED_LED\n.model RED_LED D(IS=1e-20 N=2)\n.op\n.end'
   };
   const profile = { gnd: 1, trig: 2, out: 3, reset: 4, cont: 5, thres: 6, disch: 7, vcc: 8 };
   const rows = 'ABCDEFGHIJ';
@@ -24,7 +25,9 @@
         lines[lines.length - 1] += ' ' + line.slice(1).trim();
       } else lines.push(line);
     }
-    const models = new Map(), top = [];
+    const models = new Map(),
+      diodeModels = new Map(),
+      top = [];
     let inModel = false;
     for (const line of lines) {
       const [name, ...args] = line.split(/\s+/);
@@ -37,6 +40,24 @@
         case '.ends':
           if (!inModel) throw Error('Unexpected .ENDS.');
           inModel = false;
+          break;
+        case '.model': {
+          // .model NAME D(params…) — diode models for Dn anode cathode mname
+          const rest = line.replace(/^\.\w+\s+/i, '').trim();
+          const match = rest.match(/^(\S+)\s+([A-Za-z]\w*)\s*(?:\((.*)\))?\s*$/);
+          if (!match) throw Error('Invalid .MODEL declaration.');
+          const [, modelName, modelType] = match;
+          if (modelType.toUpperCase() !== 'D') {
+            throw Error('Unsupported .MODEL type ' + modelType + ' (only D / diode).');
+          }
+          diodeModels.set(modelName.toLowerCase(), modelName);
+          break;
+        }
+        case '.op':
+        case '.tran':
+        case '.dc':
+        case '.ac':
+          // Analysis cards — wiring board ignores them.
           break;
         case '.end':
           if (inModel) throw Error('Missing .ENDS.');
@@ -71,6 +92,22 @@
           pins: terms
             .map((term, i) => ({ term, pin: profile[term], net: args[i].toUpperCase() }))
             .sort((a, b) => a.pin - b.pin)
+        };
+      }
+      if (kind === 'D') {
+        if (args.length !== 3) throw Error('Unsupported statement: ' + [name, ...args].join(' '));
+        const modelName = args[2];
+        if (!diodeModels.has(modelName.toLowerCase())) {
+          throw Error(name + ': unknown diode model ' + modelName + '. Add a matching .MODEL … D(…).');
+        }
+        return {
+          id,
+          kind,
+          value: diodeModels.get(modelName.toLowerCase()),
+          pins: [
+            { term: 'A', pin: 1, net: args[0].toUpperCase() },
+            { term: 'K', pin: 2, net: args[1].toUpperCase() }
+          ]
         };
       }
       const valid =
@@ -386,9 +423,19 @@
 
   function makePiece(p, q) {
     const kindClass =
-      p.kind === 'X' ? ' ic piece-x' : p.kind === 'R' ? ' piece-r' : p.kind === 'C' ? ' piece-c' : p.kind === 'V' ? ' piece-v' : '';
+      p.kind === 'X'
+        ? ' ic piece-x'
+        : p.kind === 'R'
+          ? ' piece-r'
+          : p.kind === 'C'
+            ? ' piece-c'
+            : p.kind === 'V'
+              ? ' piece-v'
+              : p.kind === 'D'
+                ? ' piece-d'
+                : '';
     const chip = positioned(
-      el('button', undefined, 'piece' + kindClass),
+      el('button', undefined, 'piece' + kindClass + (p.kind === 'D' && flipped.has(p.id) ? ' flipped' : '')),
       x(q.c) + (p.kind === 'X' ? 57 : q.r >= 10 ? 0 : 38),
       p.kind === 'X' ? (y(4) + y(5)) / 2 : q.r >= 10 ? (y(10) + y(11)) / 2 : y(q.r)
     );
@@ -408,6 +455,11 @@
       chip.append(el('span', undefined, 'part-lead lead-r'));
     } else if (p.kind === 'C') {
       chip.append(el('span', prettyValue(p.value) || p.id, 'part-body'));
+    } else if (p.kind === 'D') {
+      chip.append(el('span', undefined, 'part-lead lead-l'));
+      chip.append(el('span', 'LED', 'part-body'));
+      chip.append(el('span', undefined, 'part-lead lead-r'));
+      chip.append(el('span', undefined, 'diode-cathode'));
     } else {
       chip.append(el('span', p.id, 'part-body'));
     }
@@ -418,7 +470,7 @@
   }
 
   const boardHoles = new Map();
-  const colors = { R: '#ffc174', C: '#7bd9ef', V: '#ff929b', X: '#c5a7ff' };
+  const colors = { R: '#ffc174', C: '#7bd9ef', V: '#ff929b', X: '#c5a7ff', D: '#ff6b6b' };
   const colorFor = (id) => colors[id[0]] ?? '#79e3c2';
   let held = null,
     touch = null,
