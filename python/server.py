@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import sys
+import time
 import urllib.error
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -181,7 +183,12 @@ def mock_diagnose(payload: dict) -> str:
     if stage == "verify":
         return "Re-measure VCC, OUT, and CTRL. Healthy rails should sit near expected values."
 
-    return "Follow Build → Investigate → Repair → Verify."
+    if stage == "debug":
+        ch = payload.get("channel") or "A0"
+        net = payload.get("net") or "VCC"
+        return f"Scope {ch} on net {net}. Yellow holes are the probe points — run the scope to watch the waveform."
+
+    return "Build the circuit, then open Debug for the A0 scope."
 
 
 def _gemini_generate(prompt: str, model: str) -> str | None:
@@ -327,6 +334,64 @@ class Handler(SimpleHTTPRequestHandler):
             bridge.close()
             ok = bridge.connect()
             self._json(200, {"ok": ok, "arduino": bridge.status()})
+            return
+        if self.path == "/api/scope":
+            data = self._read_json()
+            channel = str(data.get("channel", "A0")).upper()
+            count = max(8, min(int(data.get("samples", 64)), 200))
+            # Map channel → net using bridge defaults
+            net = None
+            for n, ch in bridge.net_map.items():
+                if ch == channel:
+                    net = n
+                    break
+            if net is None:
+                net = {"A0": "VCC", "A1": "0", "A2": "OUT", "A3": "CTRL", "A4": "TIMING", "A5": "DISCHARGE"}.get(
+                    channel, "VCC"
+                )
+            fault = str(data.get("fault", "healthy"))
+            volts: list[float] = []
+            source = "mock"
+            note = ""
+            if PREFER_ARDUINO and bridge.enabled:
+                try:
+                    if not bridge.connect():
+                        raise RuntimeError(bridge.last_error or "not connected")
+                    for _ in range(count):
+                        volts.append(round(float(bridge.read_voltage(net, channel)), 3))
+                    source = "arduino"
+                    note = f"Live sweep from {bridge.port} {channel}"
+                except Exception as exc:  # noqa: BLE001
+                    note = f"Arduino sweep failed ({exc}); mock waveform"
+                    source = "mock"
+            if not volts:
+                # Mock waveforms: A0/VCC ≈ DC rail; A2/OUT ≈ slow square (555-ish)
+                base = mock_voltage(net, fault)
+                for i in range(count):
+                    if channel == "A2" or net == "OUT":
+                        # ~500 Hz square-ish mock between rails
+                        phase = math.sin(2 * math.pi * 8 * (i / count))
+                        v = 4.8 if phase >= 0 else 0.2
+                        v += random.uniform(-0.05, 0.05)
+                    elif channel in ("A4",) or net == "TIMING":
+                        v = 1.6 + 1.7 * (0.5 + 0.5 * math.sin(2 * math.pi * 3 * (i / count)))
+                        v += random.uniform(-0.04, 0.04)
+                    else:
+                        v = base + random.uniform(-0.03, 0.03)
+                    volts.append(round(max(0.0, min(5.2, v)), 3))
+                if not note:
+                    note = "Mock scope sweep (set ARDUINO_PORT for live A0)"
+            self._json(
+                200,
+                {
+                    "channel": channel,
+                    "net": net,
+                    "volts": volts,
+                    "count": len(volts),
+                    "source": source,
+                    "note": note,
+                },
+            )
             return
         self._json(404, {"error": "not found"})
 

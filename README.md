@@ -2,9 +2,9 @@
 
 Hackathon MVP: assemble a **555 timer** breadboard circuit from a SPICE-like netlist, then diagnose it with a closed loop of **highlighted probe points → voltage readings → understandable next actions**.
 
-Journey: **Build → Investigate → Repair → Verify**.
+Modes: **Build** the 555 (or divider), then **Debug** with an **A0 oscilloscope** and yellow probe points on the breadboard.
 
-**Standout loop:** circuit model → physical measurement request (yellow hole) → capture reading (Arduino or mock) → Gemini/local coach → repair → verify.
+**Standout loop:** place circuit → Debug → highlight A0 probe holes → scope sweep (Arduino or mock waveform) → Gemini/local coach tip.
 
 ## Quick start
 
@@ -52,10 +52,8 @@ The Coach panel shows live link status. **Capture reading** prefers Arduino; **F
 
 ## Demo path (555 timer)
 
-1. **Build** — Auto-set parts + jumpers → Continue to Investigate.
-2. **Investigate** — Symptom (e.g. board unpowered) → Start diagnostic loop → Capture reading on the yellow hole.
-3. **Repair** — Follow the coach. With mock-only, set fault → Healthy. With Arduino, fix the real wiring.
-4. **Verify** — Capture VCC → OUT → CTRL until rails look healthy.
+1. **Build** — Auto-set parts + jumpers → **Open Debug (A0 scope)**.
+2. **Debug** — Yellow holes mark A0 (VCC) probe points. **Run scope** to plot the waveform (live Arduino or mock). Switch channel for A1–A5.
 
 ## What is mocked vs live
 
@@ -82,7 +80,8 @@ requirements.txt
 
 - `GET /api/status` → Gemini + Arduino link state
 - `POST /api/measure` `{ "net", "hole", "fault", "forceMock?" }` → `{ "voltage", "source": "arduino"|"mock", ... }`
-- `POST /api/diagnose` journey context → `{ "message", "source": "gemini"|"mock" }`
+- `POST /api/scope` `{ "channel": "A0", "samples": 64 }` → `{ "volts": [...], "net", "source" }`
+- `POST /api/diagnose` context → `{ "message", "source": "gemini"|"mock" }`
 - `POST /api/arduino/reconnect` → reopen serial port
 
 ## License

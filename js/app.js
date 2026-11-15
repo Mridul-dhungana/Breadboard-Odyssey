@@ -1,28 +1,29 @@
 (function () {
   const $ = (id) => document.getElementById(id);
-  const stages = ['build', 'investigate', 'repair', 'verify'];
+  let mode = 'build'; // build | debug
 
-  function renderJourney() {
-    const stage = Diagnose.state.stage;
-    for (const s of stages) {
-      const btn = $('stage-' + s);
-      if (!btn) continue;
-      btn.classList.toggle('active', s === stage);
-      const idx = stages.indexOf(s);
-      const cur = stages.indexOf(stage);
-      btn.classList.toggle('done', idx < cur);
+  function setMode(next) {
+    mode = next;
+    $('stage-build').classList.toggle('active', mode === 'build');
+    $('stage-debug').classList.toggle('active', mode === 'debug');
+    $('panel-build').hidden = mode !== 'build';
+    $('panel-debug').hidden = mode !== 'debug';
+    if (mode === 'debug') {
+      enterDebug();
+    } else {
+      Scope.stop();
+      Board.setMeasureTargets([]);
+      $('probeHint').textContent = '';
+      refreshCoach();
     }
-    $('panel-build').hidden = stage !== 'build';
-    $('panel-investigate').hidden = stage !== 'investigate';
-    $('panel-repair').hidden = stage !== 'repair';
-    $('panel-verify').hidden = stage !== 'verify';
-    updateCoach();
     updateBuildChecklist();
-    updateReadings();
-    updateRepair();
   }
 
-  function updateCoach() {
+  function updateCoach(message, source) {
+    if (message) {
+      Diagnose.state.coach = message;
+      Diagnose.state.coachSource = source || 'local';
+    }
     const el = $('coach');
     const src = Diagnose.state.coachSource;
     el.innerHTML = '';
@@ -31,7 +32,7 @@
     tag.textContent = 'Next action';
     const badge = document.createElement('span');
     badge.className = 'badge ' + (src === 'gemini' ? 'live' : 'mock');
-    badge.textContent = src === 'gemini' ? 'Gemini' : src === 'local' ? 'Local heuristics' : 'Mock coach';
+    badge.textContent = src === 'gemini' ? 'Gemini' : src === 'local' ? 'Local' : 'Mock coach';
     tag.append(badge);
     const body = document.createElement('div');
     body.textContent = Diagnose.state.coach;
@@ -41,7 +42,7 @@
   function updateBuildChecklist() {
     const snap = Board.snapshot();
     const items = [
-      ['timer', snap.hasTimer, '555 TIMER_DEMO imported'],
+      ['timer', snap.hasTimer || snap.parts.length > 0, 'Netlist imported'],
       ['placed', snap.allPlaced, 'All parts placed'],
       ['jumpers', snap.allJumpersDrawn, 'Suggested jumpers drawn']
     ];
@@ -53,71 +54,51 @@
       li.className = ok ? 'ok' : 'muted';
       ul.append(li);
     }
-    $('toInvestigate').disabled = !(snap.hasTimer && snap.allPlaced && snap.allJumpersDrawn);
-  }
-
-  function fillReadingsBox(box) {
-    if (!box) return;
-    box.replaceChildren();
-    if (!Diagnose.state.readings.length) {
-      box.append(Object.assign(document.createElement('p'), { className: 'muted', textContent: 'No readings yet.' }));
-      return;
-    }
-    const table = document.createElement('table');
-    const head = table.createTHead().insertRow();
-    for (const h of ['Net', 'Hole', 'V', 'Expect', 'OK', 'Src']) head.append(Object.assign(document.createElement('th'), { textContent: h }));
-    const body = table.createTBody();
-    for (const r of Diagnose.state.readings.slice().reverse()) {
-      const tr = body.insertRow();
-      for (const v of [
-        r.net,
-        r.hole,
-        r.volts.toFixed(2),
-        r.expected == null ? '—' : r.expected.toFixed(2),
-        r.ok == null ? '—' : r.ok ? 'yes' : 'no',
-        r.source
-      ]) {
-        tr.append(Object.assign(document.createElement('td'), { textContent: v }));
-      }
-    }
-    box.append(table);
-  }
-
-  function updateReadings() {
-    fillReadingsBox($('readings'));
-    fillReadingsBox($('verifyReadings'));
-  }
-
-  function updateRepair() {
-    const guide = Diagnose.suggestRepair();
-    $('repairTitle').textContent = guide.title;
-    const ol = $('repairSteps');
-    ol.replaceChildren();
-    for (const step of guide.steps) {
-      const li = document.createElement('li');
-      li.textContent = step;
-      ol.append(li);
-    }
-    $('fault').value = Diagnose.state.fault;
+    const ready = snap.allPlaced && snap.allJumpersDrawn && snap.parts.length > 0;
+    $('toDebug').disabled = !ready;
   }
 
   async function refreshCoach() {
+    Diagnose.setStage(mode === 'debug' ? 'investigate' : 'build');
+    if (mode === 'debug') {
+      const ch = $('scopeChannel').value;
+      const { net, holes } = Scope.holesForChannel(ch);
+      Diagnose.state.coach =
+        `Debug A0-style probe on ${ch} (net ${net}). Yellow holes mark probing points` +
+        (holes.length ? ` (${holes.slice(0, 4).join(', ')}${holes.length > 4 ? '…' : ''})` : ' — place parts first') +
+        '. Run scope to plot the waveform.';
+      Diagnose.state.coachSource = 'local';
+      updateCoach();
+      // Optional Gemini tip
+      try {
+        await Diagnose.askCoach({
+          stage: 'debug',
+          channel: ch,
+          net,
+          holes,
+          scope: { lastVolts: Scope.state.lastVolts, source: Scope.state.source }
+        });
+        updateCoach();
+      } catch {
+        updateCoach();
+      }
+      return;
+    }
     await Diagnose.askCoach();
     updateCoach();
   }
 
-  function setStage(stage) {
-    Diagnose.setStage(stage);
-    if (stage === 'investigate' && Diagnose.state.symptom && !Diagnose.state.pending) {
-      const net = Diagnose.state.symptom.firstNet;
-      Diagnose.requestMeasure(net);
-    }
-    if (stage === 'verify') {
-      Diagnose.clearReadings();
-      Diagnose.requestMeasure('VCC');
-    }
-    renderJourney();
+  function enterDebug() {
+    const ch = $('scopeChannel').value || 'A0';
+    const { net, holes } = Scope.highlightProbe(ch);
+    $('probeHint').textContent = holes.length
+      ? `Probing ${ch} → net ${net} at ${holes.join(', ')}`
+      : `Probing ${ch} → net ${net}. Place parts so probe holes can be highlighted.`;
+    const canvas = $('scopeCanvas');
+    Scope.draw(canvas, Scope.state.samples);
+    $('scopeReadout').textContent = 'Ready — press Run scope';
     refreshCoach();
+    Board.status(`Debug: probe ${ch} (${net}). Yellow = probing points.`);
   }
 
   async function refreshHwStatus() {
@@ -128,152 +109,73 @@
       const data = await res.json();
       const gem = data.gemini?.configured
         ? `Gemini ready (${data.gemini.model})`
-        : 'Gemini off — export GEMINI_API_KEY';
+        : 'Gemini off — set GEMINI_API_KEY in .env';
       const ard = data.arduino || {};
       let a;
-      if (!ard.enabled) a = 'Arduino off — export ARDUINO_PORT=/dev/ttyACM0';
+      if (!ard.enabled) a = 'Arduino off — set ARDUINO_PORT for live A0';
       else if (ard.connected) a = `Arduino live on ${ard.port}`;
       else a = `Arduino ${ard.port} not connected${ard.lastError ? ' (' + ard.lastError + ')' : ''}`;
       el.textContent = gem + ' · ' + a;
       el.className = ard.connected && data.gemini?.configured ? 'status ok' : 'muted';
-      Diagnose.hw = data;
     } catch {
       el.textContent = 'Server status unavailable (is python/server.py running?)';
       el.className = 'status error';
     }
   }
 
-  async function captureReading(manual, forceMock = false) {
-    const pending = Diagnose.state.pending;
-    if (!pending) {
-      Board.status('No measurement requested yet.', true);
-      return;
-    }
-    const volts = manual ? Number($('manualVolts').value) : null;
-    const reading = await Diagnose.measure(pending.net, pending.hole, manual ? volts : null, {
-      forceMock: !!forceMock
-    });
-    updateReadings();
-    updateCoach();
-    Board.status(
-      `Measured ${reading.net} at ${reading.hole}: ${reading.volts.toFixed(2)} V` +
-        (reading.ok === false ? ' (off expected)' : reading.ok ? ' (ok)' : '')
-    );
-
-    if (Diagnose.state.stage === 'investigate') {
-      if (reading.ok === false && (reading.net === 'VCC' || reading.net === '0' || (reading.net === 'OUT' && reading.volts < 0.3))) {
-        $('toRepair').disabled = false;
-      }
-      const next = Diagnose.nextNetAfter(reading);
-      if (next) {
-        Diagnose.requestMeasure(next);
-        await refreshCoach();
-      } else {
-        Board.setMeasureTargets([]);
-        Diagnose.state.pending = null;
-        $('toRepair').disabled = false;
-        await refreshCoach();
-      }
-    }
-
-    if (Diagnose.state.stage === 'verify') {
-      if (reading.net === 'VCC') {
-        Diagnose.requestMeasure('OUT');
-        await refreshCoach();
-      } else if (reading.net === 'OUT') {
-        Diagnose.requestMeasure('CTRL');
-        await refreshCoach();
-      } else {
-        const pass = Diagnose.evaluateVerify();
-        Board.setMeasureTargets([]);
-        Diagnose.state.pending = null;
-        $('verifyResult').textContent = pass
-          ? 'Verify passed. TIMER_DEMO rails look healthy.'
-          : 'Verify failed. Return to Repair or set Mock fault to Healthy and re-measure.';
-        $('verifyResult').className = 'status ' + (pass ? 'ok' : 'error');
-        await refreshCoach();
-      }
-    }
-    renderJourney();
-  }
-
   function initUi() {
-    const faultSel = $('fault');
-    for (const [id, meta] of Object.entries(Diagnose.FAULTS)) {
-      const opt = document.createElement('option');
-      opt.value = id;
-      opt.textContent = meta.label;
-      faultSel.append(opt);
-    }
-    faultSel.value = Diagnose.state.fault;
+    $('stage-build').onclick = () => setMode('build');
+    $('stage-debug').onclick = () => setMode('debug');
+    $('toDebug').onclick = () => setMode('debug');
 
-    const symptomSel = $('symptom');
-    for (const s of Diagnose.SYMPTOMS) {
-      const opt = document.createElement('option');
-      opt.value = s.id;
-      opt.textContent = s.label;
-      symptomSel.append(opt);
-    }
-
-    for (const s of stages) {
-      $('stage-' + s).onclick = () => {
-        // Allow free navigation for demo, but encourage forward flow
-        setStage(s);
-      };
-    }
-
-    $('toInvestigate').onclick = () => setStage('investigate');
-    $('startSymptom').onclick = async () => {
-      Diagnose.setSymptom($('symptom').value);
-      Diagnose.clearReadings();
-      $('toRepair').disabled = true;
-      const net = Diagnose.state.symptom.firstNet;
-      Diagnose.requestMeasure(net);
-      await refreshCoach();
-      updateReadings();
-      Board.status('Measure the highlighted hole for ' + net + '.');
+    $('scopeChannel').onchange = () => {
+      if (mode === 'debug') enterDebug();
     };
-    $('captureMock').onclick = () => captureReading(false, false);
-    $('captureManual').onclick = () => captureReading(true);
-    $('forceMock').onclick = () => captureReading(false, true);
-    $('captureVerify').onclick = () => captureReading(false, false);
+    $('scopeRun').onclick = () => {
+      Scope.highlightProbe($('scopeChannel').value);
+      Scope.start($('scopeCanvas'), $('scopeReadout'), () => refreshCoach());
+    };
+    $('scopeStop').onclick = () => {
+      Scope.stop();
+      $('scopeReadout').textContent = 'Stopped';
+    };
+    $('scopeOnce').onclick = async () => {
+      Scope.highlightProbe($('scopeChannel').value);
+      try {
+        await Scope.once($('scopeCanvas'), $('scopeReadout'), () => refreshCoach());
+      } catch (e) {
+        $('scopeReadout').textContent = 'Capture failed: ' + e.message;
+      }
+    };
+
     $('refreshHw').onclick = () => refreshHwStatus();
     $('reconnectArduino').onclick = async () => {
       try {
-        await fetch('/api/arduino/reconnect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        await fetch('/api/arduino/reconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}'
+        });
       } catch {}
       await refreshHwStatus();
     };
-    $('toRepair').onclick = () => setStage('repair');
-    $('markRepaired').onclick = async () => {
-      Diagnose.setFault('healthy');
-      Diagnose.state.repairDone = true;
-      $('fault').value = 'healthy';
-      await refreshCoach();
-      updateRepair();
-      Board.status('Mock fault cleared. Continue to Verify.');
-    };
-    $('toVerify').onclick = () => setStage('verify');
-    $('fault').onchange = async () => {
-      Diagnose.setFault($('fault').value);
-      await refreshCoach();
-    };
+
     Board.onChange = () => {
-      if (Diagnose.state.stage === 'build') updateBuildChecklist();
-      refreshCoach();
-    };
-    Board.onMeasureClick = (hole, net) => {
-      if (Diagnose.state.pending && Diagnose.state.pending.hole === hole) {
-        captureReading(false);
-      } else if (net) {
-        Board.status('Clicked ' + hole + ' (' + net + '). Use Capture reading when it is the requested net.');
+      updateBuildChecklist();
+      if (mode === 'debug') {
+        Scope.highlightProbe($('scopeChannel').value);
+        const { net, holes } = Scope.holesForChannel($('scopeChannel').value);
+        $('probeHint').textContent = holes.length
+          ? `Probing ${$('scopeChannel').value} → net ${net} at ${holes.join(', ')}`
+          : `Probing ${$('scopeChannel').value} → net ${net}`;
       }
+      if (mode === 'build') refreshCoach();
     };
   }
 
   Board.init();
   initUi();
-  renderJourney();
+  updateBuildChecklist();
   refreshHwStatus();
   refreshCoach();
   setInterval(refreshHwStatus, 15000);
