@@ -71,6 +71,9 @@ def _dedupe_models(*groups: list[str]) -> list[str]:
 
 
 GEMINI_MODEL_FALLBACKS: list[str] = _dedupe_models([GEMINI_MODEL], _DEFAULT_GEMINI_CANDIDATES)
+# Remap if .env still names a retired id (e.g. gemini-1.5-flash).
+if GEMINI_MODEL not in GEMINI_MODEL_FALLBACKS:
+    GEMINI_MODEL = GEMINI_MODEL_FALLBACKS[0] if GEMINI_MODEL_FALLBACKS else DEFAULT_GEMINI_MODEL
 ACTIVE_GEMINI_MODEL = GEMINI_MODEL
 LAST_GEMINI_ERROR: str | None = None
 _DISCOVERED_GEMINI_MODELS: list[str] | None = None
