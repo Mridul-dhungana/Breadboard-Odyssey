@@ -455,6 +455,11 @@ a{color:var(--accent)}
 .tray button,.piece{touch-action:none}
 .stack{display:grid;gap:10px}
 .stack label{display:grid;gap:4px;font-size:13px;color:var(--muted)}
+.sr-only{
+  position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+  overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;
+}
+body.mode-debug #coach{display:none}
 .coach{
   background:#080808;
   border:1px solid var(--line-strong);
@@ -467,6 +472,60 @@ a{color:var(--accent)}
 .coach .tag{display:inline-flex;align-items:center;gap:6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-bottom:8px;font-weight:600}
 .coach.warn{border-color:color-mix(in srgb, var(--warn) 45%, #333);background:#120f08}
 .coach.error{border-color:color-mix(in srgb, var(--danger) 40%, #333);background:#140a09}
+.chat-log{
+  display:flex;flex-direction:column;gap:10px;
+  max-height:min(52vh, 520px);
+  overflow:auto;
+  padding:10px;
+  margin:10px 0 12px;
+  background:#060606;
+  border:1px solid var(--line-strong);
+  border-radius:10px;
+  scroll-behavior:smooth;
+}
+.chat-bubble{
+  max-width:95%;
+  padding:10px 12px;
+  border-radius:12px;
+  font-size:13.5px;
+  line-height:1.45;
+  white-space:pre-wrap;
+  word-break:break-word;
+}
+.chat-bubble.user{
+  align-self:flex-end;
+  background:#132018;
+  border:1px solid color-mix(in srgb, var(--accent) 35%, #333);
+  color:#e8fff3;
+}
+.chat-bubble.assistant{
+  align-self:flex-start;
+  background:#101010;
+  border:1px solid var(--line-strong);
+  color:var(--text);
+}
+.chat-bubble.system{
+  align-self:center;
+  background:transparent;
+  border:1px dashed var(--line-strong);
+  color:var(--muted);
+  font-size:12.5px;
+  max-width:100%;
+}
+.chat-bubble .chat-meta{
+  display:block;
+  font:600 10px/1.2 var(--mono);
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin-bottom:6px;
+}
+.chat-bubble.assistant .chat-meta{color:var(--accent)}
+.chat-bubble.pending{opacity:.7;font-style:italic}
+.chat-compose textarea{
+  margin-bottom:8px;
+  min-height:4.5rem;
+}
 .readings{font:13px var(--mono)}
 .badge{
   display:inline-block;padding:2px 8px;border-radius:6px;

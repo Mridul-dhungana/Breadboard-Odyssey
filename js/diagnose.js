@@ -1,4 +1,4 @@
-/* Live diagnostics for TIMER_DEMO — Arduino measure + Gemini coach only (no mocks). */
+/* Live diagnostics — Arduino measure + Gemini chat coach (no mocks). */
 (function (global) {
   const EXPECTED = {
     VCC: { nom: 5.0, tol: 0.4, label: 'Supply rail' },
@@ -16,6 +16,9 @@
     { id: 'no_power', label: 'Board seems unpowered', firstNet: 'VCC' }
   ];
 
+  const OPENING =
+    "What's not working with your circuit? Describe the symptom — I'll ask clarifying questions if needed, then suggest probe or repair steps.";
+
   const state = {
     stage: 'build',
     symptom: null,
@@ -23,8 +26,9 @@
     pending: null,
     repairDone: false,
     verified: false,
-    coach: 'Import the 555 timer netlist, auto-set or place parts — wires fit automatically.',
-    coachSource: 'local'
+    coach: 'Import a netlist, auto-set or place parts — wires fit automatically.',
+    coachSource: 'local',
+    history: []
   };
 
   function expectedFor(net) {
@@ -36,16 +40,76 @@
     return Math.abs(reading - exp.nom) <= exp.tol;
   }
 
+  function circuitSnapshot() {
+    const snap = Board.snapshot();
+    return {
+      hasTimer: snap.hasTimer,
+      allPlaced: snap.allPlaced,
+      allJumpersDrawn: snap.allJumpersDrawn,
+      jumperCount: snap.jumpersDrawn?.length ?? 0,
+      parts: (snap.parts || []).map((p) => ({
+        id: p.id,
+        kind: p.kind,
+        value: p.value,
+        nets: (p.pins || []).map((pin) => pin.net)
+      })),
+      nets: [
+        ...new Set(
+          (snap.placements || []).flatMap((p) => (p.pins || []).map((pin) => pin.net))
+        )
+      ]
+    };
+  }
+
+  function historyForApi() {
+    return state.history
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => ({
+        role: m.role,
+        text: String(m.text || '').slice(0, 1200),
+        at: m.at || null
+      }));
+  }
+
+  function pushMessage(role, text, meta = {}) {
+    const msg = {
+      id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+      role,
+      text: String(text || '').trim(),
+      at: new Date().toISOString(),
+      ...meta
+    };
+    if (!msg.text) return null;
+    state.history.push(msg);
+    if (role === 'assistant' || role === 'system') {
+      state.coach = msg.text;
+      state.coachSource = meta.source || (role === 'assistant' ? 'gemini' : 'local');
+    }
+    Diagnose.onHistoryChange?.(state.history);
+    return msg;
+  }
+
+  function ensureOpening() {
+    if (!state.history.length) {
+      pushMessage('assistant', OPENING, { source: 'local', kind: 'opening' });
+    }
+  }
+
+  function clearChat() {
+    state.history = [];
+    ensureOpening();
+  }
+
   function localCoach(ctx) {
     const { stage, snap } = ctx;
     if (stage === 'build') {
-      if (!snap.hasTimer) return 'Load the 555 timer example, then place every part (wires fit as you go).';
+      if (!snap.parts?.length) return 'Import a netlist (Divider, 555, or Dual LEDs), then place parts.';
       if (!snap.allPlaced) return 'Place all parts on the board (Auto-set is fine).';
       if (!snap.allJumpersDrawn) return 'Move parts or press Fit wires so every net can connect.';
-      return 'Build looks complete. Open Debug, connect Arduino for LIVE scope, then Analyze with Gemini.';
+      return 'Build looks complete. Open Debug and say what’s not working in the chat.';
     }
-    if (stage === 'debug' || stage === 'investigate') {
-      return 'Connect Arduino, Run scope until readout says LIVE, then Analyze signal with Gemini.';
+    if (stage === 'debug' || stage === 'investigate' || stage === 'chat') {
+      return OPENING;
     }
     return 'Live Arduino + Gemini only — no simulated measurements.';
   }
@@ -57,14 +121,7 @@
       symptom: state.symptom,
       pending: state.pending,
       readings: state.readings,
-      circuit: {
-        hasTimer: snap.hasTimer,
-        allPlaced: snap.allPlaced,
-        allJumpersDrawn: snap.allJumpersDrawn,
-        jumperCount: snap.jumpersDrawn?.length ?? 0,
-        parts: snap.parts,
-        nets: snap.placements.flatMap((p) => p.pins.map((pin) => pin.net))
-      },
+      circuit: circuitSnapshot(),
       ...extra
     };
     const fallback = localCoach({
@@ -89,6 +146,51 @@
       state.coach = fallback;
       state.coachSource = 'local';
       return { message: fallback, source: 'local' };
+    }
+  }
+
+  async function sendChat(extra = {}) {
+    ensureOpening();
+    const userText = String(extra.userMessage || '').trim();
+    if (userText) {
+      pushMessage('user', userText, {
+        kind: extra.markStepsDone ? 'steps_done' : extra.intent === 'analyze_signal' ? 'scope' : 'chat'
+      });
+    }
+
+    state.stage = 'chat';
+    const payload = {
+      stage: 'chat',
+      intent: extra.intent || (extra.markStepsDone ? 'steps_done' : 'chat'),
+      userMessage: userText || null,
+      markStepsDone: !!extra.markStepsDone,
+      history: historyForApi(),
+      circuit: circuitSnapshot(),
+      readings: (state.readings || []).slice(-6),
+      channel: extra.channel,
+      net: extra.net,
+      holes: extra.holes,
+      scope: extra.scope
+    };
+
+    try {
+      const res = await fetch('/api/diagnose', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error('diagnose failed (' + res.status + ')');
+      const data = await res.json();
+      const message = data.message || 'No reply from the coach.';
+      pushMessage('assistant', message, {
+        source: data.source || 'error',
+        model: data.model || null
+      });
+      return data;
+    } catch (err) {
+      const message = 'Chat request failed: ' + (err?.message || 'network error');
+      pushMessage('assistant', message, { source: 'error' });
+      return { message, source: 'error', reason: 'network_error', error: String(err?.message || err) };
     }
   }
 
@@ -150,47 +252,9 @@
   }
 
   function suggestRepair() {
-    const last = state.readings[state.readings.length - 1];
-    if (!last) {
-      return { title: 'No live readings yet', steps: ['Capture a LIVE Arduino reading on VCC.'] };
-    }
-    if (last.net === 'VCC' && !last.ok) {
-      return {
-        title: 'Restore the 5 V rail',
-        steps: [
-          'Confirm the DC supply part sits on the top + / − rails.',
-          'Add the red VCC jumper from the supply strip to the IC VCC net.',
-          'Re-measure VCC live from Arduino.'
-        ]
-      };
-    }
-    if (last.net === '0' && !last.ok) {
-      return {
-        title: 'Fix the ground return',
-        steps: [
-          'Check the blue ground jumper to the IC GND pin.',
-          'Ensure the supply − lead is on the top − rail.',
-          'Re-measure ground live from Arduino.'
-        ]
-      };
-    }
-    if (last.net === 'OUT' && last.volts < 0.3) {
-      return {
-        title: 'Clear the output short / stuck-low path',
-        steps: [
-          'Inspect OUT wiring for an accidental short to ground.',
-          'Confirm RESET is tied to VCC in the TIMER_DEMO fixture.',
-          'Re-measure OUT live from Arduino.'
-        ]
-      };
-    }
     return {
-      title: 'General TIMER_DEMO repair',
-      steps: [
-        'Revisit jumpers for VCC, GND, TIMING, and OUT.',
-        'Reseat the NE555P profile (XU1) if pins look misaligned.',
-        'Use Analyze signal with Gemini on a LIVE capture.'
-      ]
+      title: 'Use Debug chat',
+      steps: ['Describe the symptom in Debug chat and follow the coach steps.']
     };
   }
 
@@ -213,45 +277,27 @@
   }
 
   async function processFault(extra = {}) {
-    state.stage = 'process_fault';
-    const snap = Board.snapshot();
-    const payload = {
-      stage: 'process_fault',
+    // Scope capture attaches into the chat so history stays continuous.
+    const scopeNote = extra.scope
+      ? 'I captured a live scope sweep on ' +
+        (extra.channel || 'ADC') +
+        (extra.net ? ' (net ' + extra.net + ')' : '') +
+        '. What does this signal suggest, and what should I do next?'
+      : 'Please diagnose the circuit from the live scope capture.';
+    return sendChat({
+      ...extra,
       intent: extra.intent || 'analyze_signal',
-      symptom: state.symptom,
-      readings: (state.readings || []).slice(-6),
-      circuit: {
-        hasTimer: snap.hasTimer,
-        allPlaced: snap.allPlaced,
-        allJumpersDrawn: snap.allJumpersDrawn,
-        jumperCount: snap.jumpersDrawn?.length ?? 0
-      },
-      ...extra
-    };
-    try {
-      const res = await fetch('/api/diagnose', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      if (!res.ok) throw new Error('diagnose failed (' + res.status + ')');
-      const data = await res.json();
-      state.coach = data.message || 'Gemini returned no analysis.';
-      state.coachSource = data.source || 'error';
-      return data;
-    } catch (err) {
-      const message = 'Gemini request failed: ' + (err?.message || 'network error');
-      state.coach = message;
-      state.coachSource = 'error';
-      return { message, source: 'error', reason: 'network_error', error: String(err?.message || err) };
-    }
+      userMessage: extra.userMessage || scopeNote
+    });
   }
 
   global.Diagnose = {
     SYMPTOMS,
     EXPECTED,
+    OPENING,
     state,
     askCoach,
+    sendChat,
     processFault,
     measure,
     requestMeasure,
@@ -260,6 +306,11 @@
     evaluateVerify,
     expectedFor,
     within,
+    pushMessage,
+    ensureOpening,
+    clearChat,
+    historyForApi,
+    onHistoryChange: null,
     setStage(stage) {
       state.stage = stage;
     },

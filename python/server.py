@@ -277,15 +277,48 @@ def _slim_diagnose_context(payload: dict) -> dict:
         "net": payload.get("net"),
         "holes": payload.get("holes"),
         "symptom": payload.get("symptom"),
+        "userMessage": payload.get("userMessage"),
+        "markStepsDone": payload.get("markStepsDone"),
     }
     circuit = payload.get("circuit")
     if isinstance(circuit, dict):
-        ctx["circuit"] = {
+        slim_circuit: dict = {
             "hasTimer": circuit.get("hasTimer"),
             "allPlaced": circuit.get("allPlaced"),
             "allJumpersDrawn": circuit.get("allJumpersDrawn"),
             "jumperCount": circuit.get("jumperCount"),
         }
+        nets = circuit.get("nets")
+        if isinstance(nets, list):
+            slim_circuit["nets"] = [str(n) for n in nets[:24]]
+        parts = circuit.get("parts")
+        if isinstance(parts, list):
+            slim_parts = []
+            for p in parts[:20]:
+                if not isinstance(p, dict):
+                    continue
+                slim_parts.append(
+                    {
+                        k: p.get(k)
+                        for k in ("id", "kind", "value", "nets")
+                        if k in p
+                    }
+                )
+            slim_circuit["parts"] = slim_parts
+        ctx["circuit"] = slim_circuit
+    history = payload.get("history")
+    if isinstance(history, list) and history:
+        slim_hist = []
+        for item in history[-24:]:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            text = item.get("text")
+            if role not in ("user", "assistant") or not text:
+                continue
+            slim_hist.append({"role": role, "text": str(text)[:1200]})
+        if slim_hist:
+            ctx["history"] = slim_hist
     readings = payload.get("readings")
     if isinstance(readings, list) and readings:
         # Last few live readings only
@@ -296,7 +329,7 @@ def _slim_diagnose_context(payload: dict) -> dict:
             slim.append(
                 {
                     k: r.get(k)
-                    for k in ("net", "voltage", "ok", "source", "channel")
+                    for k in ("net", "voltage", "volts", "ok", "source", "channel")
                     if k in r
                 }
             )
@@ -338,20 +371,21 @@ def gemini_diagnose(payload: dict) -> tuple[str | None, str | None, str | None]:
     ctx = _slim_diagnose_context(payload)
     dump = json.dumps({"expected": expected_block, "session": ctx}, separators=(",", ":"))
     stage = ctx.get("stage")
-    if stage == "process_fault":
+    intent = ctx.get("intent")
+    if stage in ("chat", "process_fault") or intent in ("chat", "steps_done", "analyze_signal"):
         prompt = (
-            "Electronics lab coach for 555 TIMER_DEMO (breadboard, not SPICE). "
-            "Student captured a LIVE Arduino scope sweep. Reply in under 80 words: "
-            "(1) signal type (rail/open/stuck/oscillating/noise), "
-            "(2) likely fault one sentence, "
-            "(3) 2-3 concrete next probe/repair steps. No markdown.\n"
+            "You are a breadboard lab debug coach (wiring UI, not a SPICE simulator). "
+            "Use the full chat history plus circuit/scope JSON. "
+            "Ask a clarifying question when the symptom is vague. "
+            "When giving help, use short numbered steps the student can mark done. "
+            "If they say steps are done, acknowledge and give the next probe/repair step "
+            "(or ask what changed). Stay under 120 words. No markdown.\n"
             f"{dump}"
         )
-        max_tokens = 220
+        max_tokens = 260
     else:
         prompt = (
-            "Electronics lab coach for 555 TIMER_DEMO. "
-            "Interpret LIVE Arduino volts vs expected rails. "
+            "Electronics lab coach for a breadboard build. "
             "Give ONE next action in 1-2 short sentences. No markdown.\n"
             f"{dump}"
         )
@@ -559,10 +593,11 @@ class Handler(SimpleHTTPRequestHandler):
                 "geminiConfigured": bool(GEMINI_API_KEY),
             }
             stage = data.get("stage")
-            # Assembly tips stay local — Gemini only for signal/fault analysis.
+            intent = data.get("intent")
+            # Build tips stay local; Debug chat + scope analysis go to Gemini.
             needs_gemini = (
-                stage in ("process_fault", "investigate", "repair", "verify")
-                or data.get("intent") == "analyze_signal"
+                stage in ("process_fault", "investigate", "repair", "verify", "chat")
+                or intent in ("analyze_signal", "chat", "steps_done")
             )
             if not needs_gemini:
                 self._json(200, {"message": local_guide(data), "source": "local"})
