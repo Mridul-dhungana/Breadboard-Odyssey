@@ -16,7 +16,6 @@
     samples: [],
     source: 'idle',
     lastVolts: null,
-    expanded: false,
     inFlight: false
   };
 
@@ -54,11 +53,9 @@
   function syncCanvasSize(canvas) {
     if (!canvas) return;
     const wrap = canvas.parentElement;
-    const cssW = Math.max(wrap?.clientWidth || canvas.clientWidth || 720, 320);
-    const ratio = state.expanded ? 16 / 9 : 720 / 320;
-    const cssH = state.expanded
-      ? Math.max(Math.min(window.innerHeight * 0.72, cssW / ratio), 280)
-      : Math.max(cssW / ratio, 220);
+    const cssW = Math.max(wrap?.clientWidth || canvas.clientWidth || 1100, 480);
+    const ratio = 16 / 5.5;
+    const cssH = Math.max(cssW / ratio, 280);
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const tw = Math.round(cssW * dpr);
     const th = Math.round(cssH * dpr);
@@ -76,10 +73,10 @@
     const ctx = canvas.getContext('2d');
     const w = canvas.width;
     const h = canvas.height;
-    const scale = w / 720;
-    ctx.fillStyle = '#030303';
+    const scale = w / 1100;
+    ctx.fillStyle = '#010201';
     ctx.fillRect(0, 0, w, h);
-    ctx.strokeStyle = '#1a1a1a';
+    ctx.strokeStyle = '#142018';
     ctx.lineWidth = Math.max(1, scale);
     const gx = 40 * scale;
     const gy = 28 * scale;
@@ -207,26 +204,6 @@
     return data;
   }
 
-  function setExpanded(expanded, canvas) {
-    state.expanded = !!expanded;
-    const panel = document.getElementById('scopePanel');
-    const expandBtn = document.getElementById('scopeExpand');
-    const collapseBtn = document.getElementById('scopeCollapse');
-    document.body.classList.toggle('scope-expanded', state.expanded);
-    panel?.classList.toggle('expanded', state.expanded);
-    if (expandBtn) {
-      expandBtn.setAttribute('aria-expanded', state.expanded ? 'true' : 'false');
-      expandBtn.textContent = state.expanded ? 'Expanded' : 'Expand scope';
-      expandBtn.disabled = state.expanded;
-    }
-    if (collapseBtn) collapseBtn.hidden = !state.expanded;
-    if (canvas) {
-      draw(canvas, state.samples, {
-        color: state.source === 'arduino' ? '#5ad6ff' : '#ff7b6b'
-      });
-    }
-  }
-
   global.Scope = {
     CHANNEL_NET,
     state,
@@ -237,7 +214,6 @@
     start,
     stop,
     once,
-    setExpanded,
     syncCanvasSize
   };
 })(window);

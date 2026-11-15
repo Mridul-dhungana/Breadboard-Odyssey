@@ -7,17 +7,20 @@
 
   function setMode(next) {
     mode = next;
+    document.body.classList.toggle('mode-debug', mode === 'debug');
     $('stage-build').classList.toggle('active', mode === 'build');
     $('stage-debug').classList.toggle('active', mode === 'debug');
     $('panel-build').hidden = mode !== 'build';
     $('panel-debug').hidden = mode !== 'debug';
+    const hero = $('scopeHero');
+    if (hero) hero.hidden = mode !== 'debug';
     if (mode === 'debug') {
       enterDebug();
+      requestAnimationFrame(() => Scope.draw($('scopeCanvas'), Scope.state.samples));
     } else {
       Scope.stop();
-      Scope.setExpanded(false, $('scopeCanvas'));
       Board.setMeasureTargets([]);
-      $('probeHint').textContent = '';
+      if ($('probeHint')) $('probeHint').textContent = '';
       refreshCoach();
     }
     updateBuildChecklist();
@@ -313,13 +316,6 @@
         $('scopeReadout').textContent = 'Capture failed: ' + e.message;
       }
     };
-    $('scopeExpand').onclick = () => Scope.setExpanded(true, $('scopeCanvas'));
-    $('scopeCollapse').onclick = () => Scope.setExpanded(false, $('scopeCanvas'));
-    window.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && Scope.state.expanded) {
-        Scope.setExpanded(false, $('scopeCanvas'));
-      }
-    });
     window.addEventListener('resize', () => {
       if (mode === 'debug') Scope.draw($('scopeCanvas'), Scope.state.samples);
     });

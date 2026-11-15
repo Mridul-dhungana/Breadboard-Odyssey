@@ -8,7 +8,7 @@
   <i aria-hidden="true">⌁</i>
   <div>
     <h1>Breadboard Odyssey</h1>
-    <p>Build the circuit, then Debug with a professional A0 oscilloscope probe</p>
+    <p>Build the circuit, then Debug with a live A0 oscilloscope</p>
   </div>
   <nav class="journey-bar" aria-label="Modes">
     <button type="button" id="stage-build" class="active">Build</button>
@@ -16,6 +16,39 @@
   </nav>
 </header>
 <main>
+  <section id="scopeHero" class="scope-hero" hidden>
+    <div class="scope-hero-top">
+      <div>
+        <p class="scope-kicker">Live instrument</p>
+        <h2>Oscilloscope</h2>
+      </div>
+      <div class="scope-hero-controls">
+        <label class="scope-channel">Channel
+          <select id="scopeChannel" aria-label="Scope channel">
+            <option value="A0" selected>A0 · VCC</option>
+            <option value="A1">A1 · GND</option>
+            <option value="A2">A2 · OUT</option>
+            <option value="A3">A3 · CTRL</option>
+            <option value="A4">A4 · TIMING</option>
+            <option value="A5">A5 · DISCHARGE</option>
+          </select>
+        </label>
+        <button type="button" id="scopeRun" class="primary">Run scope</button>
+        <button type="button" id="scopeStop">Stop</button>
+        <button type="button" id="scopeOnce">Single capture</button>
+        <button type="button" id="processFault" class="gemini" title="Capture waveform and ask Gemini to diagnose">Analyze signal with Gemini</button>
+      </div>
+    </div>
+    <div class="scope-panel" id="scopePanel">
+      <div class="scope-wrap">
+        <div class="scope-glow" aria-hidden="true"></div>
+        <canvas id="scopeCanvas" width="1280" height="420" aria-label="A0 oscilloscope"></canvas>
+        <div id="scopeReadout" class="scope-readout muted">Idle — connect Arduino and press Run scope</div>
+      </div>
+    </div>
+    <p id="probeHint" class="status scope-probe" role="status"></p>
+  </section>
+
   <aside>
     <section>
       <h2>Coach</h2>
@@ -53,40 +86,9 @@
     </section>
 
     <section id="panel-debug" hidden>
-      <h2>Debug · A0 scope</h2>
-      <div class="stack">
-        <p class="muted">Yellow holes mark active probe points. Expand the scope for a larger view, then analyze the captured signal with Gemini.</p>
-        <label>Channel
-          <select id="scopeChannel" aria-label="Scope channel">
-            <option value="A0" selected>A0 · VCC</option>
-            <option value="A1">A1 · GND</option>
-            <option value="A2">A2 · OUT</option>
-            <option value="A3">A3 · CTRL</option>
-            <option value="A4">A4 · TIMING</option>
-            <option value="A5">A5 · DISCHARGE</option>
-          </select>
-        </label>
-        <div class="toolbar">
-          <button type="button" id="scopeRun" class="primary">Run scope</button>
-          <button type="button" id="scopeStop">Stop</button>
-          <button type="button" id="scopeOnce">Single capture</button>
-          <button type="button" id="scopeExpand" aria-expanded="false">Expand scope</button>
-        </div>
-        <div class="scope-panel" id="scopePanel">
-          <div class="scope-panel-bar">
-            <strong>Oscilloscope</strong>
-            <button type="button" id="scopeCollapse" hidden>Collapse</button>
-          </div>
-          <div class="scope-wrap">
-            <canvas id="scopeCanvas" width="720" height="320" aria-label="A0 oscilloscope"></canvas>
-            <div id="scopeReadout" class="scope-readout muted">Idle</div>
-          </div>
-        </div>
-        <div class="toolbar">
-          <button type="button" id="processFault" class="gemini" title="Capture waveform and ask Gemini to diagnose">Analyze signal with Gemini</button>
-        </div>
-        <p id="probeHint" class="status" role="status"></p>
-      </div>
+      <h2>Debug</h2>
+      <p class="muted">Yellow holes mark the active probe points for the selected ADC channel on the breadboard below.</p>
+      <p class="muted" style="margin-top:8px">Use the scope hero above for Run / capture / Gemini analysis.</p>
     </section>
 
     <section>
@@ -95,7 +97,7 @@
     </section>
   </aside>
 
-  <div>
+  <div class="workspace">
     <section>
       <div class="toolbar">
         <h2>Breadboard</h2>
