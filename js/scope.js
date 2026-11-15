@@ -1,12 +1,13 @@
 /* Oscilloscope helper for Debug mode (A0 by default). */
 (function (global) {
-  const CHANNEL_NET = {
-    A0: 'VCC',
-    A1: '0',
-    A2: 'OUT',
-    A3: 'CTRL',
-    A4: 'TIMING',
-    A5: 'DISCHARGE'
+  // Optional soft hints only when those nets exist on the board (not shown in the UI).
+  const CHANNEL_NET_HINTS = {
+    A0: ['VCC', 'VIN'],
+    A1: ['0', 'GND'],
+    A2: ['OUT', 'LED1_A'],
+    A3: ['CTRL', 'LED2_A'],
+    A4: ['TIMING'],
+    A5: ['DISCHARGE']
   };
 
   const state = {
@@ -23,18 +24,39 @@
   const ONCE_SAMPLES = 120;
   const RUN_INTERVAL_MS = 90;
 
+  function boardNets() {
+    const nets = new Set();
+    for (const place of Board.snapshot().placements || []) {
+      for (const pin of place.pins || []) {
+        if (pin.net) nets.add(String(pin.net).toUpperCase());
+      }
+    }
+    return nets;
+  }
+
   function netFor(channel) {
-    return CHANNEL_NET[String(channel || 'A0').toUpperCase()] || 'VCC';
+    const ch = String(channel || 'A0').toUpperCase();
+    const present = boardNets();
+    for (const hint of CHANNEL_NET_HINTS[ch] || []) {
+      if (present.has(String(hint).toUpperCase())) return String(hint).toUpperCase() === 'GND' ? '0' : hint;
+    }
+    // Fall back to ordered unique board nets so channels still highlight something useful.
+    const ordered = [...present].sort((a, b) => {
+      const rank = (n) => (n === '0' || n === 'GND' ? 2 : n === 'VCC' || n === 'VIN' ? 0 : 1);
+      return rank(a) - rank(b) || a.localeCompare(b);
+    });
+    const idx = ['A0', 'A1', 'A2', 'A3', 'A4', 'A5'].indexOf(ch);
+    return idx >= 0 && ordered[idx] ? ordered[idx] : null;
   }
 
   function holesForChannel(channel) {
     const net = netFor(channel);
-    const snap = Board.snapshot();
     const holes = [];
-    for (const place of snap.placements) {
-      for (const pin of place.pins) {
-        if (pin.net === net || (net === '0' && pin.net === '0')) {
-          holes.push(pin.hole);
+    if (!net) return { net: null, holes };
+    for (const place of Board.snapshot().placements || []) {
+      for (const pin of place.pins || []) {
+        if (pin.net === net || (net === '0' && (pin.net === '0' || pin.net === 'GND'))) {
+          if (pin.hole) holes.push(pin.hole);
         }
       }
     }
@@ -205,7 +227,7 @@
   }
 
   global.Scope = {
-    CHANNEL_NET,
+    CHANNEL_NET_HINTS,
     state,
     netFor,
     holesForChannel,

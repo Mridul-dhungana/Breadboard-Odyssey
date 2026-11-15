@@ -2,8 +2,9 @@
   const $ = (id) => document.getElementById(id);
   let mode = 'build'; // build | debug
   let processBusy = false;
+  let chatBusy = false;
   let geminiReady = false;
-  const ANALYZE_LABEL = 'Analyze signal with Gemini';
+  const ANALYZE_LABEL = 'Capture + ask chat';
 
   function setMode(next) {
     mode = next;
@@ -32,6 +33,7 @@
       Diagnose.state.coachSource = source || 'local';
     }
     const el = $('coach');
+    if (!el) return;
     const src = Diagnose.state.coachSource;
     el.innerHTML = '';
     el.className = 'coach' + (tone === 'error' ? ' error' : tone === 'warn' ? ' warn' : '');
@@ -55,6 +57,85 @@
     el.append(tag, body);
   }
 
+  function renderChat() {
+    const log = $('debugChat');
+    if (!log) return;
+    log.replaceChildren();
+    for (const msg of Diagnose.state.history) {
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble ' + (msg.role || 'system');
+      if (msg.pending) bubble.classList.add('pending');
+      const meta = document.createElement('span');
+      meta.className = 'chat-meta';
+      meta.textContent =
+        msg.role === 'user'
+          ? 'You'
+          : msg.role === 'assistant'
+            ? msg.source === 'gemini'
+              ? 'Coach · Gemini'
+              : msg.source === 'error'
+                ? 'Coach · Error'
+                : 'Coach'
+            : 'Note';
+      const body = document.createElement('div');
+      body.textContent = msg.text;
+      bubble.append(meta, body);
+      log.append(bubble);
+    }
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function setChatBusy(busy) {
+    chatBusy = busy;
+    const send = $('debugChatSend');
+    const done = $('debugStepsDone');
+    const input = $('debugChatInput');
+    if (send) send.disabled = busy;
+    if (done) done.disabled = busy;
+    if (input) input.disabled = busy;
+    updateProcessFaultButtons(wiringReady(Board.snapshot()));
+  }
+
+  async function submitChat(userMessage, opts = {}) {
+    const text = String(userMessage || '').trim();
+    if (!text && !opts.markStepsDone && !opts.scope) return;
+    setChatBusy(true);
+    renderChat();
+    try {
+      await refreshHwStatus();
+      if (!geminiReady && !opts.allowLocal) {
+        Diagnose.pushMessage(
+          'assistant',
+          'Gemini is not linked. Add GEMINI_API_KEY to .env (or Cloud Agent secrets), restart the server, then send again.',
+          { source: 'error' }
+        );
+        renderChat();
+        return;
+      }
+      const data = await Diagnose.sendChat({
+        userMessage: text,
+        markStepsDone: !!opts.markStepsDone,
+        intent: opts.intent || (opts.markStepsDone ? 'steps_done' : 'chat'),
+        channel: opts.channel,
+        net: opts.net,
+        holes: opts.holes,
+        scope: opts.scope
+      });
+      renderChat();
+      if (data?.source === 'gemini') {
+        Board.status('Coach replied' + (data.model ? ` (${data.model})` : '') + '.');
+      } else if (data?.source === 'error') {
+        Board.status('Coach error — see Debug chat.');
+      }
+    } catch (e) {
+      Diagnose.pushMessage('assistant', 'Could not reach coach: ' + e.message, { source: 'error' });
+      renderChat();
+    } finally {
+      setChatBusy(false);
+      renderChat();
+    }
+  }
+
   function wiringReady(snap) {
     return snap.allPlaced && snap.allJumpersDrawn && snap.parts.length > 0;
   }
@@ -62,20 +143,20 @@
   function updateProcessFaultButtons(ready) {
     const buildBtn = $('processFaultBuild');
     const debugBtn = $('processFault');
+    const busy = processBusy || chatBusy;
     if (buildBtn) {
-      buildBtn.disabled = !ready || processBusy;
+      buildBtn.disabled = !ready || busy;
       buildBtn.title = ready
-        ? 'Send circuit + scope context to Gemini'
+        ? 'Open Debug, capture scope, and ask in chat'
         : 'Place parts so jumpers can be fitted first';
-      buildBtn.textContent = processBusy ? 'Gemini analyzing…' : ANALYZE_LABEL;
+      buildBtn.textContent = processBusy ? 'Capturing…' : ANALYZE_LABEL;
     }
     if (debugBtn) {
-      // Debug: always allow signal analysis (capture first if needed)
-      debugBtn.disabled = processBusy;
+      debugBtn.disabled = busy;
       debugBtn.title = geminiReady
-        ? 'Capture waveform and ask Gemini to diagnose the signal'
+        ? 'Capture waveform and append it to Debug chat'
         : 'Gemini API key missing — click to see setup steps';
-      debugBtn.textContent = processBusy ? 'Gemini analyzing…' : ANALYZE_LABEL;
+      debugBtn.textContent = processBusy ? 'Capturing…' : ANALYZE_LABEL;
     }
   }
 
@@ -102,14 +183,7 @@
   async function refreshCoach() {
     Diagnose.setStage(mode === 'debug' ? 'investigate' : 'build');
     if (mode === 'debug') {
-      const ch = $('scopeChannel').value;
-      const { net, holes } = Scope.holesForChannel(ch);
-      Diagnose.state.coach =
-        `Debug probe on ${ch} (net ${net}). Yellow holes mark probing points` +
-        (holes.length ? ` (${holes.slice(0, 4).join(', ')}${holes.length > 4 ? '…' : ''})` : ' — place parts first') +
-        '. Run scope, then use Analyze signal with Gemini.';
-      Diagnose.state.coachSource = 'local';
-      updateCoach();
+      renderChat();
       return;
     }
     await Diagnose.askCoach();
@@ -117,16 +191,25 @@
   }
 
   function enterDebug() {
+    Diagnose.setStage('investigate');
+    Diagnose.ensureOpening();
+    renderChat();
     const ch = $('scopeChannel').value || 'A0';
     const { net, holes } = Scope.highlightProbe(ch);
     $('probeHint').textContent = holes.length
-      ? `Probing ${ch} → net ${net} at ${holes.join(', ')}`
-      : `Probing ${ch} → net ${net}. Place parts so probe holes can be highlighted.`;
+      ? `Probing ${ch}` + (net ? ` → net ${net}` : '') + ` at ${holes.join(', ')}`
+      : `Probing ${ch}` + (net ? ` → net ${net}` : '') + '. Place parts so probe holes can be highlighted.';
     const canvas = $('scopeCanvas');
     Scope.draw(canvas, Scope.state.samples);
     $('scopeReadout').textContent = 'Ready — press Run scope';
-    refreshCoach();
-    Board.status(`Debug: probe ${ch} (${net}). Yellow = probing points.`);
+    Board.status(`Debug: probe ${ch}` + (net ? ` (${net})` : '') + '. Tell the chat what’s not working.');
+    requestAnimationFrame(() => {
+      const input = $('debugChatInput');
+      if (input) {
+        input.focus();
+        input.placeholder = "What's not working?";
+      }
+    });
   }
 
   function fillArduinoPorts(arduino) {
@@ -208,12 +291,11 @@
   async function processFault() {
     processBusy = true;
     updateProcessFaultButtons(wiringReady(Board.snapshot()));
-    updateCoach('Capturing signal and requesting Gemini analysis…', 'local');
     try {
       if (mode !== 'debug') {
         if (!wiringReady(Board.snapshot())) {
           updateCoach(
-            'Finish placing parts so wires can fit, or open Debug and capture a waveform first.',
+            'Finish placing parts so wires can fit, then open Debug and describe what’s wrong.',
             'local',
             'warn'
           );
@@ -223,11 +305,12 @@
       }
       await refreshHwStatus();
       if (!geminiReady) {
-        updateCoach(
-          'Gemini is not analyzing because GEMINI_API_KEY is not set on the server. Create /workspace/.env with GEMINI_API_KEY=… (or add it as a Cursor Cloud Agent secret), restart python/server.py, then press Analyze signal with Gemini again.',
-          'local',
-          'error'
+        Diagnose.pushMessage(
+          'assistant',
+          'Gemini is not analyzing because GEMINI_API_KEY is not set on the server. Create .env with GEMINI_API_KEY=…, restart python/server.py, then try Capture + ask chat again.',
+          { source: 'error' }
         );
+        renderChat();
         Board.status('Gemini unavailable — API key missing.');
         return;
       }
@@ -239,28 +322,33 @@
         scopeData = await Scope.once($('scopeCanvas'), $('scopeReadout'));
       } catch (e) {
         $('scopeReadout').textContent = 'Capture failed: ' + e.message;
-        updateCoach('Could not capture scope signal: ' + e.message, 'local', 'error');
+        Diagnose.pushMessage('assistant', 'Could not capture scope signal: ' + e.message, {
+          source: 'error'
+        });
+        renderChat();
         return;
       }
       if (scopeData?.source !== 'arduino' || !Scope.state.samples.length) {
-        updateCoach(
-          'Cannot analyze — need a LIVE Arduino capture: ' +
+        Diagnose.pushMessage(
+          'assistant',
+          'Need a LIVE Arduino capture before I can read the signal: ' +
             (scopeData?.arduinoError || scopeData?.note || 'not connected') +
-            '. Pick the serial port, click Reconnect Arduino, Run scope until LIVE, then try again.',
-          'error',
-          'error'
+            '. Pick the serial port, Reconnect Arduino, Run scope until LIVE, then try again.',
+          { source: 'error' }
         );
+        renderChat();
         return;
       }
       const samples = Scope.state.samples || [];
       const stats = signalStats(samples);
-      // Send a thin sample set — full sweeps only slow Gemini.
       const step = Math.max(1, Math.floor(samples.length / 12));
       const thinSamples = samples.filter((_, i) => i % step === 0).slice(0, 12);
+      const probe = Scope.holesForChannel(ch);
+      setChatBusy(true);
       const data = await Diagnose.processFault({
         channel: ch,
-        net: Scope.netFor(ch),
-        holes: Scope.holesForChannel(ch).holes,
+        net: probe.net,
+        holes: probe.holes,
         intent: 'analyze_signal',
         scope: {
           samples: thinSamples,
@@ -272,25 +360,18 @@
           stats
         }
       });
-
+      renderChat();
       if (data.source === 'gemini') {
-        updateCoach(data.message, 'gemini');
-        Board.status('Gemini signal analysis ready' + (data.model ? ` (${data.model})` : '') + '.');
+        Board.status('Scope note added to chat' + (data.model ? ` (${data.model})` : '') + '.');
       } else {
-        const reason = data.reason || 'unknown';
-        const detail = data.error || data.detail || '';
-        updateCoach(
-          (data.message || 'Gemini did not return an analysis.') +
-            ` [reason: ${reason}${detail ? ' — ' + detail : ''}]`,
-          'error',
-          'error'
-        );
-        Board.status('Gemini analysis failed — see Coach.');
+        Board.status('Gemini analysis failed — see Debug chat.');
       }
     } catch (e) {
-      updateCoach('Could not analyze signal: ' + e.message, 'local', 'error');
+      Diagnose.pushMessage('assistant', 'Could not analyze signal: ' + e.message, { source: 'error' });
+      renderChat();
     } finally {
       processBusy = false;
+      setChatBusy(false);
       updateProcessFaultButtons(wiringReady(Board.snapshot()));
     }
   }
@@ -326,6 +407,28 @@
     $('processFault').onclick = () => processFault();
     $('processFaultBuild').onclick = () => processFault();
 
+    $('debugChatForm').onsubmit = (e) => {
+      e.preventDefault();
+      const input = $('debugChatInput');
+      const text = input.value;
+      input.value = '';
+      submitChat(text);
+    };
+    $('debugStepsDone').onclick = () => {
+      submitChat('I finished the last steps you suggested. What should I check next?', {
+        markStepsDone: true,
+        intent: 'steps_done'
+      });
+    };
+    $('debugClearChat').onclick = () => {
+      Diagnose.clearChat();
+      renderChat();
+      Board.status('Debug chat cleared.');
+    };
+    Diagnose.onHistoryChange = () => {
+      if (mode === 'debug') renderChat();
+    };
+
     $('refreshHw').onclick = () => refreshHwStatus();
     $('reconnectArduino').onclick = async () => {
       const port = $('arduinoPort')?.value || '';
@@ -337,14 +440,24 @@
         });
         const data = await res.json();
         if (!data.ok) {
-          updateCoach(
-            'Arduino reconnect failed: ' + (data.arduino?.lastError || 'no port / not connected') +
-              '. Scope will not show fake live waveforms until the board links.',
-            'local',
-            'error'
-          );
+          const msg =
+            'Arduino reconnect failed: ' +
+            (data.arduino?.lastError || 'no port / not connected') +
+            '. Scope will not show fake live waveforms until the board links.';
+          if (mode === 'debug') {
+            Diagnose.pushMessage('system', msg, { source: 'local' });
+            renderChat();
+          } else {
+            updateCoach(msg, 'local', 'error');
+          }
         } else {
-          updateCoach('Arduino linked on ' + (data.arduino?.port || port) + '. Run scope for LIVE samples.', 'local');
+          const msg = 'Arduino linked on ' + (data.arduino?.port || port) + '. Run scope for LIVE samples.';
+          if (mode === 'debug') {
+            Diagnose.pushMessage('system', msg, { source: 'local' });
+            renderChat();
+          } else {
+            updateCoach(msg, 'local');
+          }
         }
       } catch (e) {
         updateCoach('Arduino reconnect error: ' + e.message, 'local', 'error');
@@ -358,8 +471,8 @@
         Scope.highlightProbe($('scopeChannel').value);
         const { net, holes } = Scope.holesForChannel($('scopeChannel').value);
         $('probeHint').textContent = holes.length
-          ? `Probing ${$('scopeChannel').value} → net ${net} at ${holes.join(', ')}`
-          : `Probing ${$('scopeChannel').value} → net ${net}`;
+          ? `Probing ${$('scopeChannel').value}` + (net ? ` → net ${net}` : '') + ` at ${holes.join(', ')}`
+          : `Probing ${$('scopeChannel').value}` + (net ? ` → net ${net}` : '');
       }
       if (mode === 'build') refreshCoach();
     };
