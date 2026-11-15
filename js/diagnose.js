@@ -23,7 +23,7 @@
     pending: null,
     repairDone: false,
     verified: false,
-    coach: 'Import the 555 timer netlist, auto-set or place parts, then add suggested jumpers.',
+    coach: 'Import the 555 timer netlist, auto-set or place parts — wires fit automatically.',
     coachSource: 'local'
   };
 
@@ -39,9 +39,9 @@
   function localCoach(ctx) {
     const { stage, snap } = ctx;
     if (stage === 'build') {
-      if (!snap.hasTimer) return 'Load the 555 timer example, then place every part and draw the suggested jumpers.';
+      if (!snap.hasTimer) return 'Load the 555 timer example, then place every part (wires fit as you go).';
       if (!snap.allPlaced) return 'Place all parts on the board (Auto-set is fine).';
-      if (!snap.allJumpersDrawn) return 'Add every suggested jumper so the nets are connected.';
+      if (!snap.allJumpersDrawn) return 'Move parts or press Fit wires so every net can connect.';
       return 'Build looks complete. Open Debug, connect Arduino for LIVE scope, then Analyze with Gemini.';
     }
     if (stage === 'debug' || stage === 'investigate') {
