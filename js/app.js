@@ -66,7 +66,7 @@
       buildBtn.disabled = !ready || processBusy;
       buildBtn.title = ready
         ? 'Send circuit + scope context to Gemini'
-        : 'Draw all suggested jumpers first';
+        : 'Place parts so jumpers can be fitted first';
       buildBtn.textContent = processBusy ? 'Gemini analyzing…' : ANALYZE_LABEL;
     }
     if (debugBtn) {
@@ -84,7 +84,7 @@
     const items = [
       ['timer', snap.hasTimer || snap.parts.length > 0, 'Netlist imported'],
       ['placed', snap.allPlaced, 'All parts placed'],
-      ['jumpers', snap.allJumpersDrawn, 'Suggested jumpers drawn']
+      ['jumpers', snap.allJumpersDrawn, 'Wires fitted']
     ];
     const ul = $('buildChecklist');
     ul.replaceChildren();
@@ -213,7 +213,7 @@
       if (mode !== 'debug') {
         if (!wiringReady(Board.snapshot())) {
           updateCoach(
-            'Finish placing parts and draw every suggested jumper, or open Debug and capture a waveform first.',
+            'Finish placing parts so wires can fit, or open Debug and capture a waveform first.',
             'local',
             'warn'
           );

@@ -275,6 +275,13 @@
     Board.onChange?.();
   }
 
+  function fitWires() {
+    drawn.clear();
+    const routes = plan();
+    for (const w of routes) if (!w.error) drawn.add(w.key);
+    return routes;
+  }
+
   function place(id, r, c) {
     const part = parts.find((p) => p.id === id);
     if (!part) {
@@ -283,11 +290,17 @@
     }
     try {
       assign(part, r, c);
-      drawn.clear();
       selected = id;
       highlight = [];
+      const routes = fitWires();
       render();
-      status(id + ' placed at ' + cell(r, c) + '.');
+      const wired = routes.filter((w) => !w.error).length;
+      status(
+        id +
+          ' placed at ' +
+          cell(r, c) +
+          (wired ? ' · ' + wired + ' wire' + (wired === 1 ? '' : 's') + ' fitted.' : '.')
+      );
       Board.onChange?.();
     } catch (e) {
       status(e.message, true);
@@ -732,27 +745,16 @@
         list.append(el('p', w.net + ': move parts to free holes for jumpers.', 'error'));
         continue;
       }
-      const row = el('div', undefined, 'toolbar');
-      const route = el('button', w.net + ' · ' + w.labels.join(' ↔ '));
+      const route = el('button', w.net + ' · ' + w.labels.join(' ↔ ') + (drawn.has(w.key) ? ' ✓' : ''));
+      route.className = 'jump';
       route.onclick = () => {
         highlight = w.labels;
         render();
-        status('Connect ' + w.labels.join(' to ') + ' for ' + w.net + '.');
+        status('Highlight ' + w.labels.join(' ↔ ') + ' for ' + w.net + '.');
       };
-      const toggle = el('button', drawn.has(w.key) ? 'Remove wire' : 'Add wire');
-      toggle.setAttribute('aria-label', toggle.textContent + ' ' + w.labels.join(' to '));
-      toggle.onclick = () => {
-        const added = !drawn.delete(w.key);
-        if (added) drawn.add(w.key);
-        highlight = added ? w.labels : [];
-        render();
-        status(added ? 'Jumper added.' : 'Jumper removed.');
-        Board.onChange?.();
-      };
-      row.append(route, toggle);
-      list.append(row);
+      list.append(route);
     }
-    if (!routes.length) list.append(el('p', 'Place parts to see jumper suggestions.', 'muted'));
+    if (!routes.length) list.append(el('p', 'Place parts to see jumper routes. Fit wires draws them automatically.', 'muted'));
   }
 
   function load() {
@@ -822,6 +824,7 @@
     parse,
     plan,
     suggest,
+    fitWires,
     load,
     render,
     status,
@@ -854,6 +857,23 @@
         };
       }
       $('import').onclick = load;
+      $('fitWires').onclick = () => {
+        if (!placements.size) {
+          status('Place parts before fitting wires.', true);
+          return;
+        }
+        highlight = [];
+        const routes = fitWires();
+        render();
+        const ok = routes.filter((w) => !w.error).length;
+        const bad = routes.filter((w) => w.error).length;
+        status(
+          bad
+            ? 'Fitted ' + ok + ' wire' + (ok === 1 ? '' : 's') + '. Move parts to free holes for ' + bad + ' net' + (bad === 1 ? '' : 's') + '.'
+            : 'Fitted ' + ok + ' wire' + (ok === 1 ? '' : 's') + '.'
+        );
+        Board.onChange?.();
+      };
       $('rotate').onclick = () => {
         const part = parts.find((p) => p.id === selected);
         if (!part) return;
@@ -867,10 +887,11 @@
           if (q) assign(part, q.r, q.c, flip);
           else if (flip) flipped.add(selected);
           else flipped.delete(selected);
-          drawn.clear();
           highlight = [];
+          if (placements.has(part.id)) fitWires();
+          else drawn.clear();
           render();
-          status(part.id + ' rotated 180°.');
+          status(part.id + ' rotated 180°' + (placements.has(part.id) ? ' · wires refitted.' : '.'));
           Board.onChange?.();
         } catch (e) {
           status(e.message, true);
@@ -878,10 +899,10 @@
       };
       $('remove').onclick = () => {
         if (placements.delete(selected)) {
-          drawn.clear();
           highlight = [];
+          fitWires();
           render();
-          status(selected + ' moved back to the tray.');
+          status(selected + ' moved back to the tray · wires refitted.');
           Board.onChange?.();
         }
       };
@@ -904,14 +925,12 @@
           assign(part, next.r, next.c);
         }
         highlight = [];
-        drawn.clear();
-        const routes = plan();
-        for (const w of routes) if (!w.error) drawn.add(w.key);
+        const routes = fitWires();
         render();
         status(
           routes.some((w) => w.error)
             ? 'Parts placed. Move parts to free holes for all jumpers.'
-            : 'Placed ' + parts.length + ' parts and ' + drawn.size + ' jumpers.'
+            : 'Placed ' + parts.length + ' parts and fitted ' + drawn.size + ' wires.'
         );
         Board.onChange?.();
       };
