@@ -52,8 +52,8 @@ The Coach panel shows live link status. **Capture reading** prefers Arduino; **F
 
 ## Demo path (555 timer)
 
-1. **Build** — Auto-set parts + jumpers → **Open Debug (A0 scope)**.
-2. **Debug** — Yellow holes mark A0 (VCC) probe points. **Run scope** to plot the waveform (live Arduino or mock). Switch channel for A1–A5.
+1. **Build** — Auto-set parts + jumpers → **Open Debug (A0 scope)** (or **Ask Gemini: process fault** once wiring is complete).
+2. **Debug** — Yellow holes mark A0 (VCC) probe points. **Run scope** / **Expand scope** for a larger view. When all wires are set, **Ask Gemini: process fault** captures the waveform and returns a diagnosis + repair steps.
 
 ## What is mocked vs live
 
@@ -81,7 +81,7 @@ requirements.txt
 - `GET /api/status` → Gemini + Arduino link state
 - `POST /api/measure` `{ "net", "hole", "fault", "forceMock?" }` → `{ "voltage", "source": "arduino"|"mock", ... }`
 - `POST /api/scope` `{ "channel": "A0", "samples": 64 }` → `{ "volts": [...], "net", "source" }`
-- `POST /api/diagnose` context → `{ "message", "source": "gemini"|"mock" }`
+- `POST /api/diagnose` context → `{ "message", "source": "gemini"|"mock" }` (use `stage: "process_fault"` for full diagnosis + solution)
 - `POST /api/arduino/reconnect` → reopen serial port
 
 ## License

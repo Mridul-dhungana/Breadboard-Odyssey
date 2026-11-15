@@ -1,6 +1,7 @@
 (function () {
   const $ = (id) => document.getElementById(id);
   let mode = 'build'; // build | debug
+  let processBusy = false;
 
   function setMode(next) {
     mode = next;
@@ -12,6 +13,7 @@
       enterDebug();
     } else {
       Scope.stop();
+      Scope.setExpanded(false, $('scopeCanvas'));
       Board.setMeasureTargets([]);
       $('probeHint').textContent = '';
       refreshCoach();
@@ -39,6 +41,23 @@
     el.append(tag, body);
   }
 
+  function wiringReady(snap) {
+    return snap.allPlaced && snap.allJumpersDrawn && snap.parts.length > 0;
+  }
+
+  function updateProcessFaultButtons(ready) {
+    for (const id of ['processFault', 'processFaultBuild']) {
+      const btn = $(id);
+      if (!btn) continue;
+      btn.disabled = !ready || processBusy;
+      btn.title = ready
+        ? 'Send circuit + scope context to Gemini for a fault diagnosis'
+        : 'Draw all suggested jumpers first';
+      if (processBusy) btn.textContent = 'Gemini working…';
+      else btn.textContent = 'Ask Gemini: process fault';
+    }
+  }
+
   function updateBuildChecklist() {
     const snap = Board.snapshot();
     const items = [
@@ -54,8 +73,9 @@
       li.className = ok ? 'ok' : 'muted';
       ul.append(li);
     }
-    const ready = snap.allPlaced && snap.allJumpersDrawn && snap.parts.length > 0;
+    const ready = wiringReady(snap);
     $('toDebug').disabled = !ready;
+    updateProcessFaultButtons(ready);
   }
 
   async function refreshCoach() {
@@ -64,24 +84,11 @@
       const ch = $('scopeChannel').value;
       const { net, holes } = Scope.holesForChannel(ch);
       Diagnose.state.coach =
-        `Debug A0-style probe on ${ch} (net ${net}). Yellow holes mark probing points` +
+        `Debug probe on ${ch} (net ${net}). Yellow holes mark probing points` +
         (holes.length ? ` (${holes.slice(0, 4).join(', ')}${holes.length > 4 ? '…' : ''})` : ' — place parts first') +
-        '. Run scope to plot the waveform.';
+        '. Run scope to plot the waveform. When all wires are set, use Ask Gemini: process fault.';
       Diagnose.state.coachSource = 'local';
       updateCoach();
-      // Optional Gemini tip
-      try {
-        await Diagnose.askCoach({
-          stage: 'debug',
-          channel: ch,
-          net,
-          holes,
-          scope: { lastVolts: Scope.state.lastVolts, source: Scope.state.source }
-        });
-        updateCoach();
-      } catch {
-        updateCoach();
-      }
       return;
     }
     await Diagnose.askCoach();
@@ -123,6 +130,46 @@
     }
   }
 
+  async function processFault() {
+    const snap = Board.snapshot();
+    if (!wiringReady(snap)) {
+      updateCoach('Finish placing parts and draw every suggested jumper before asking Gemini.', 'local');
+      return;
+    }
+    processBusy = true;
+    updateProcessFaultButtons(true);
+    updateCoach('Capturing scope context and asking Gemini to diagnose the fault…', 'local');
+    try {
+      if (mode !== 'debug') setMode('debug');
+      const ch = $('scopeChannel').value || 'A0';
+      Scope.highlightProbe(ch);
+      let scopeData = null;
+      try {
+        scopeData = await Scope.once($('scopeCanvas'), $('scopeReadout'));
+      } catch (e) {
+        $('scopeReadout').textContent = 'Capture failed: ' + e.message;
+      }
+      const data = await Diagnose.processFault({
+        channel: ch,
+        net: Scope.netFor(ch),
+        holes: Scope.holesForChannel(ch).holes,
+        scope: {
+          samples: Scope.state.samples,
+          lastVolts: Scope.state.lastVolts,
+          source: Scope.state.source,
+          note: scopeData?.note
+        }
+      });
+      updateCoach(data.message, data.source);
+      Board.status(data.source === 'gemini' ? 'Gemini fault analysis ready.' : 'Fault analysis ready (mock/local).');
+    } catch (e) {
+      updateCoach('Could not process fault: ' + e.message, 'local');
+    } finally {
+      processBusy = false;
+      updateProcessFaultButtons(wiringReady(Board.snapshot()));
+    }
+  }
+
   function initUi() {
     $('stage-build').onclick = () => setMode('build');
     $('stage-debug').onclick = () => setMode('debug');
@@ -131,9 +178,10 @@
     $('scopeChannel').onchange = () => {
       if (mode === 'debug') enterDebug();
     };
+    // Scope tick stays local — Gemini only via Process fault button
     $('scopeRun').onclick = () => {
       Scope.highlightProbe($('scopeChannel').value);
-      Scope.start($('scopeCanvas'), $('scopeReadout'), () => refreshCoach());
+      Scope.start($('scopeCanvas'), $('scopeReadout'));
     };
     $('scopeStop').onclick = () => {
       Scope.stop();
@@ -142,11 +190,24 @@
     $('scopeOnce').onclick = async () => {
       Scope.highlightProbe($('scopeChannel').value);
       try {
-        await Scope.once($('scopeCanvas'), $('scopeReadout'), () => refreshCoach());
+        await Scope.once($('scopeCanvas'), $('scopeReadout'));
       } catch (e) {
         $('scopeReadout').textContent = 'Capture failed: ' + e.message;
       }
     };
+    $('scopeExpand').onclick = () => Scope.setExpanded(true, $('scopeCanvas'));
+    $('scopeCollapse').onclick = () => Scope.setExpanded(false, $('scopeCanvas'));
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && Scope.state.expanded) {
+        Scope.setExpanded(false, $('scopeCanvas'));
+      }
+    });
+    window.addEventListener('resize', () => {
+      if (mode === 'debug') Scope.draw($('scopeCanvas'), Scope.state.samples);
+    });
+
+    $('processFault').onclick = () => processFault();
+    $('processFaultBuild').onclick = () => processFault();
 
     $('refreshHw').onclick = () => refreshHwStatus();
     $('reconnectArduino').onclick = async () => {

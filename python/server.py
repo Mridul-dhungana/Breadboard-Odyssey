@@ -188,10 +188,28 @@ def mock_diagnose(payload: dict) -> str:
         net = payload.get("net") or "VCC"
         return f"Scope {ch} on net {net}. Yellow holes are the probe points — run the scope to watch the waveform."
 
+    if stage == "process_fault":
+        circuit = payload.get("circuit") or {}
+        if not circuit.get("allJumpersDrawn"):
+            return "Draw every suggested jumper first, then ask Gemini to process the fault."
+        scope = payload.get("scope") or {}
+        last = payload.get("lastReading") or (readings[-1] if readings else None)
+        fault = payload.get("fault") or "open_vcc"
+        volts = scope.get("lastVolts")
+        if volts is None and last:
+            volts = last.get("volts")
+        ch = payload.get("channel") or "A0"
+        volt_txt = f"{float(volts):.2f} V on {ch}" if volts is not None else "no scope capture yet"
+        return (
+            f"Mock diagnosis for fault '{fault}': latest {volt_txt}. "
+            "Check VCC and GND jumpers first, then OUT/TIMING. "
+            "Set GEMINI_API_KEY for a live model solution."
+        )
+
     return "Build the circuit, then open Debug for the A0 scope."
 
 
-def _gemini_generate(prompt: str, model: str) -> str | None:
+def _gemini_generate(prompt: str, model: str, max_tokens: int = 260) -> str | None:
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
         f":generateContent?key={GEMINI_API_KEY}"
@@ -199,7 +217,7 @@ def _gemini_generate(prompt: str, model: str) -> str | None:
     body = json.dumps(
         {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.35, "maxOutputTokens": 260},
+            "generationConfig": {"temperature": 0.35, "maxOutputTokens": max_tokens},
         }
     ).encode("utf-8")
     req = urllib.request.Request(
@@ -208,7 +226,7 @@ def _gemini_generate(prompt: str, model: str) -> str | None:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=25) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     text = (
         data.get("candidates", [{}])[0]
@@ -225,21 +243,48 @@ def gemini_diagnose(payload: dict) -> tuple[str | None, str | None]:
     if not GEMINI_API_KEY:
         return None, None
     expected_block = {k: v for k, v in EXPECTED.items() if k != "GND"}
-    prompt = (
-        "You are an electronics lab coach for Breadboard Odyssey.\n"
-        "Circuit: 555 TIMER_DEMO on a solderless breadboard (wiring fixture — not a SPICE model).\n"
-        "Hardware: optional Arduino UNO Q measuring ADC channels mapped to nets.\n"
-        "Job: interpret the latest voltage reading vs expected rails and give ONE clear next action "
-        "(which net/hole to probe next, which jumper to fix, or verify). "
-        "If source is arduino, treat the volts as physical truth. "
-        "If source is mock, say so briefly. 1-3 short sentences. No markdown, no bullet lists.\n\n"
-        f"Expected rails (nom/tol):\n{json.dumps(expected_block, indent=2)}\n\n"
-        f"Session context:\n{json.dumps(payload, indent=2)}\n"
-    )
+    # Trim huge sample arrays so the prompt stays small/fast
+    ctx = dict(payload)
+    if isinstance(ctx.get("scope"), dict):
+        scope = dict(ctx["scope"])
+        samples = scope.get("samples") or []
+        if isinstance(samples, list) and len(samples) > 24:
+            scope["sampleCount"] = len(samples)
+            scope["samples"] = samples[:: max(1, len(samples) // 24)][:24]
+            ctx["scope"] = scope
+    stage = ctx.get("stage")
+    if stage == "process_fault":
+        prompt = (
+            "You are an electronics lab coach for Breadboard Odyssey.\n"
+            "Circuit: 555 TIMER_DEMO on a solderless breadboard (wiring fixture — not a SPICE model).\n"
+            "The student finished placing parts and drawing suggested jumpers and asked you to "
+            "PROCESS THE FAULT and give a SOLUTION.\n"
+            "Using the scope samples, readings, and circuit context: (1) name the most likely fault, "
+            "(2) explain why in one short sentence, (3) give 2-4 concrete repair steps "
+            "(which jumper/net/hole to check or fix). "
+            "If scope source is arduino, treat volts as physical truth; if mock, say so briefly. "
+            "No markdown headings. Short plain sentences or a compact numbered list.\n\n"
+            f"Expected rails (nom/tol):\n{json.dumps(expected_block, indent=2)}\n\n"
+            f"Session context:\n{json.dumps(ctx, indent=2)}\n"
+        )
+        max_tokens = 420
+    else:
+        prompt = (
+            "You are an electronics lab coach for Breadboard Odyssey.\n"
+            "Circuit: 555 TIMER_DEMO on a solderless breadboard (wiring fixture — not a SPICE model).\n"
+            "Hardware: optional Arduino UNO Q measuring ADC channels mapped to nets.\n"
+            "Job: interpret the latest voltage reading vs expected rails and give ONE clear next action "
+            "(which net/hole to probe next, which jumper to fix, or verify). "
+            "If source is arduino, treat the volts as physical truth. "
+            "If source is mock, say so briefly. 1-3 short sentences. No markdown, no bullet lists.\n\n"
+            f"Expected rails (nom/tol):\n{json.dumps(expected_block, indent=2)}\n\n"
+            f"Session context:\n{json.dumps(ctx, indent=2)}\n"
+        )
+        max_tokens = 260
     last_err: Exception | None = None
     for model in GEMINI_MODEL_FALLBACKS:
         try:
-            text = _gemini_generate(prompt, model)
+            text = _gemini_generate(prompt, model, max_tokens=max_tokens)
             if text:
                 ACTIVE_GEMINI_MODEL = model
                 return text, model
@@ -338,7 +383,7 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/api/scope":
             data = self._read_json()
             channel = str(data.get("channel", "A0")).upper()
-            count = max(8, min(int(data.get("samples", 64)), 200))
+            count = max(8, min(int(data.get("samples", 40)), 200))
             # Map channel → net using bridge defaults
             net = None
             for n, ch in bridge.net_map.items():
@@ -357,10 +402,9 @@ class Handler(SimpleHTTPRequestHandler):
                 try:
                     if not bridge.connect():
                         raise RuntimeError(bridge.last_error or "not connected")
-                    for _ in range(count):
-                        volts.append(round(float(bridge.read_voltage(net, channel)), 3))
+                    volts = [round(v, 3) for v in bridge.read_sweep(channel, count, net=net)]
                     source = "arduino"
-                    note = f"Live sweep from {bridge.port} {channel}"
+                    note = f"Live batch sweep from {bridge.port} {channel}"
                 except Exception as exc:  # noqa: BLE001
                     note = f"Arduino sweep failed ({exc}); mock waveform"
                     source = "mock"

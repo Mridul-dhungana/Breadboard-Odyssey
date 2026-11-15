@@ -15,8 +15,14 @@
     channel: 'A0',
     samples: [],
     source: 'mock',
-    lastVolts: null
+    lastVolts: null,
+    expanded: false,
+    inFlight: false
   };
+
+  const RUN_SAMPLES = 40;
+  const ONCE_SAMPLES = 120;
+  const RUN_INTERVAL_MS = 90;
 
   function netFor(channel) {
     return CHANNEL_NET[String(channel || 'A0').toUpperCase()] || 'VCC';
@@ -33,7 +39,6 @@
         }
       }
     }
-    // Always try primary hole for the net
     const hit = Board.holeForNet(net);
     if (hit?.hole && !holes.includes(hit.hole)) holes.push(hit.hole);
     return { net, holes: [...new Set(holes)] };
@@ -46,33 +51,55 @@
     return { net, holes };
   }
 
+  function syncCanvasSize(canvas) {
+    if (!canvas) return;
+    const wrap = canvas.parentElement;
+    const cssW = Math.max(wrap?.clientWidth || canvas.clientWidth || 720, 320);
+    const ratio = state.expanded ? 16 / 9 : 720 / 320;
+    const cssH = state.expanded
+      ? Math.max(Math.min(window.innerHeight * 0.72, cssW / ratio), 280)
+      : Math.max(cssW / ratio, 220);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const tw = Math.round(cssW * dpr);
+    const th = Math.round(cssH * dpr);
+    if (canvas.width !== tw || canvas.height !== th) {
+      canvas.width = tw;
+      canvas.height = th;
+    }
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+  }
+
   function draw(canvas, samples, opts = {}) {
+    if (!canvas) return;
+    syncCanvasSize(canvas);
     const ctx = canvas.getContext('2d');
     const w = canvas.width;
     const h = canvas.height;
+    const scale = w / 720;
     ctx.fillStyle = '#0d1520';
     ctx.fillRect(0, 0, w, h);
-    // Grid
     ctx.strokeStyle = '#243246';
-    ctx.lineWidth = 1;
-    for (let x = 0; x <= w; x += 40) {
+    ctx.lineWidth = Math.max(1, scale);
+    const gx = 40 * scale;
+    const gy = 28 * scale;
+    for (let x = 0; x <= w; x += gx) {
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, h);
       ctx.stroke();
     }
-    for (let y = 0; y <= h; y += 28) {
+    for (let y = 0; y <= h; y += gy) {
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(w, y);
       ctx.stroke();
     }
-    // 0V / 5V guides
     const vmin = 0;
     const vmax = 5.5;
-    const yAt = (v) => h - ((v - vmin) / (vmax - vmin)) * (h - 16) - 8;
+    const yAt = (v) => h - ((v - vmin) / (vmax - vmin)) * (h - 16 * scale) - 8 * scale;
     ctx.strokeStyle = '#3a516a';
-    ctx.setLineDash([4, 4]);
+    ctx.setLineDash([4 * scale, 4 * scale]);
     for (const v of [0, 1.65, 3.3, 5]) {
       const y = yAt(v);
       ctx.beginPath();
@@ -80,22 +107,22 @@
       ctx.lineTo(w, y);
       ctx.stroke();
       ctx.fillStyle = '#7f93a8';
-      ctx.font = '11px monospace';
-      ctx.fillText(v.toFixed(2) + 'V', 6, y - 3);
+      ctx.font = `${Math.max(11, 12 * scale)}px monospace`;
+      ctx.fillText(v.toFixed(2) + 'V', 6 * scale, y - 3 * scale);
     }
     ctx.setLineDash([]);
 
     if (!samples.length) {
       ctx.fillStyle = '#7f93a8';
-      ctx.fillText('No samples yet — press Run scope', 16, h / 2);
+      ctx.fillText('No samples yet — press Run scope', 16 * scale, h / 2);
       return;
     }
 
     ctx.strokeStyle = opts.color || '#78efd2';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = Math.max(2, 2 * scale);
     ctx.beginPath();
     samples.forEach((v, i) => {
-      const x = (i / Math.max(samples.length - 1, 1)) * (w - 12) + 6;
+      const x = (i / Math.max(samples.length - 1, 1)) * (w - 12 * scale) + 6 * scale;
       const y = yAt(v);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
@@ -103,7 +130,7 @@
     ctx.stroke();
   }
 
-  async function fetchSweep(channel, count = 80) {
+  async function fetchSweep(channel, count = RUN_SAMPLES) {
     const res = await fetch('/api/scope', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -122,9 +149,15 @@
   }
 
   async function tick(canvas, readout, onUpdate) {
-    if (!state.running) return;
+    if (!state.running || state.inFlight) {
+      if (state.running) {
+        state.timer = setTimeout(() => tick(canvas, readout, onUpdate), RUN_INTERVAL_MS);
+      }
+      return;
+    }
+    state.inFlight = true;
     try {
-      const data = await fetchSweep(state.channel, 64);
+      const data = await fetchSweep(state.channel, RUN_SAMPLES);
       state.samples = data.volts || [];
       state.source = data.source || 'mock';
       state.lastVolts = state.samples.length ? state.samples[state.samples.length - 1] : null;
@@ -137,9 +170,11 @@
       onUpdate?.(data);
     } catch (err) {
       if (readout) readout.textContent = 'Scope error: ' + err.message;
+    } finally {
+      state.inFlight = false;
     }
     if (state.running) {
-      state.timer = setTimeout(() => tick(canvas, readout, onUpdate), 350);
+      state.timer = setTimeout(() => tick(canvas, readout, onUpdate), RUN_INTERVAL_MS);
     }
   }
 
@@ -151,7 +186,7 @@
 
   async function once(canvas, readout, onUpdate) {
     stop();
-    const data = await fetchSweep(state.channel, 120);
+    const data = await fetchSweep(state.channel, ONCE_SAMPLES);
     state.samples = data.volts || [];
     state.source = data.source || 'mock';
     state.lastVolts = state.samples.length ? state.samples[state.samples.length - 1] : null;
@@ -164,6 +199,22 @@
     return data;
   }
 
+  function setExpanded(expanded, canvas) {
+    state.expanded = !!expanded;
+    const panel = document.getElementById('scopePanel');
+    const expandBtn = document.getElementById('scopeExpand');
+    const collapseBtn = document.getElementById('scopeCollapse');
+    document.body.classList.toggle('scope-expanded', state.expanded);
+    panel?.classList.toggle('expanded', state.expanded);
+    if (expandBtn) {
+      expandBtn.setAttribute('aria-expanded', state.expanded ? 'true' : 'false');
+      expandBtn.textContent = state.expanded ? 'Expanded' : 'Expand scope';
+      expandBtn.disabled = state.expanded;
+    }
+    if (collapseBtn) collapseBtn.hidden = !state.expanded;
+    if (canvas) draw(canvas, state.samples, { color: state.source === 'arduino' ? '#7bd9ef' : '#78efd2' });
+  }
+
   global.Scope = {
     CHANNEL_NET,
     state,
@@ -173,6 +224,8 @@
     draw,
     start,
     stop,
-    once
+    once,
+    setExpanded,
+    syncCanvasSize
   };
 })(window);
