@@ -99,6 +99,8 @@
         hasTimer: snap.hasTimer,
         allPlaced: snap.allPlaced,
         allJumpersDrawn: snap.allJumpersDrawn,
+        jumperCount: snap.jumpersDrawn?.length ?? 0,
+        parts: snap.parts,
         nets: snap.placements.flatMap((p) => p.pins.map((pin) => pin.net))
       },
       ...extra
@@ -256,12 +258,71 @@
     return pass;
   }
 
+  function localProcessFault(ctx) {
+    const repair = suggestRepair();
+    const scope = ctx.scope || {};
+    const last = state.readings[state.readings.length - 1];
+    const faultLabel = FAULTS[state.fault]?.label || state.fault;
+    const volts =
+      scope.lastVolts != null
+        ? `${Number(scope.lastVolts).toFixed(2)} V on ${ctx.channel || 'A0'}`
+        : last
+          ? `${last.volts.toFixed(2)} V on ${last.net}`
+          : 'no capture yet';
+    return (
+      `Likely issue: ${faultLabel}. Latest reading ${volts}. ` +
+      `${repair.title}: ${repair.steps.slice(0, 2).join(' ')} ` +
+      '(Set GEMINI_API_KEY for a live Gemini diagnosis.)'
+    );
+  }
+
+  async function processFault(extra = {}) {
+    state.stage = 'process_fault';
+    const snap = Board.snapshot();
+    const payload = {
+      stage: 'process_fault',
+      intent: extra.intent || 'analyze_signal',
+      symptom: state.symptom,
+      fault: state.fault,
+      readings: state.readings,
+      circuit: {
+        hasTimer: snap.hasTimer,
+        allPlaced: snap.allPlaced,
+        allJumpersDrawn: snap.allJumpersDrawn,
+        jumperCount: snap.jumpersDrawn?.length ?? 0,
+        parts: snap.parts,
+        jumpers: snap.routes,
+        nets: snap.placements.flatMap((p) => p.pins.map((pin) => pin.net))
+      },
+      ...extra
+    };
+    const fallback = localProcessFault(extra);
+    try {
+      const res = await fetch('/api/diagnose', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error('diagnose failed (' + res.status + ')');
+      const data = await res.json();
+      state.coach = data.message || fallback;
+      state.coachSource = data.source || 'mock';
+      return data;
+    } catch (err) {
+      const message = 'Gemini request failed: ' + (err?.message || 'network error');
+      state.coach = message;
+      state.coachSource = 'local';
+      return { message, source: 'local', reason: 'network_error', error: String(err?.message || err) };
+    }
+  }
+
   global.Diagnose = {
     SYMPTOMS,
     FAULTS,
     EXPECTED,
     state,
     askCoach,
+    processFault,
     measure,
     requestMeasure,
     nextNetAfter,

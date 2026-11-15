@@ -4,6 +4,8 @@
 Protocol (newline-terminated ASCII):
   Host  ->  MEAS <channel>     e.g. MEAS A0
   Board ->  VOLTS <channel> <float>
+  Host  ->  SWEEP <channel> <count>   e.g. SWEEP A0 40
+  Board ->  SWEEP <channel> <n> v1,v2,...
   Host  ->  PING
   Board ->  PONG
 
@@ -155,6 +157,64 @@ class ArduinoBridge:
                 except ValueError:
                     continue
             raise RuntimeError(f"No VOLTS reply for {ch} (lastError={self.last_error})")
+
+    def read_sweep(self, channel: str, count: int = 40, net: str | None = None) -> list[float]:
+        """Batch ADC capture. Prefers firmware SWEEP; falls back to repeated MEAS."""
+        ch = str(channel or (self.channel_for_net(net or "VCC"))).upper()
+        n = max(8, min(int(count), 200))
+        if not self.connect():
+            raise RuntimeError(self.last_error or "Arduino not connected")
+        with self._lock:
+            assert self._ser is not None
+            self._ser.reset_input_buffer()
+            self._ser.write(f"SWEEP {ch} {n}\n".encode("ascii"))
+            self._ser.flush()
+            for _ in range(6):
+                line = self._readline()
+                if not line:
+                    continue
+                upper = line.upper()
+                if upper.startswith("ERR"):
+                    break
+                if "SWEEP" in upper.split():
+                    # SWEEP A0 40 1.2,1.3,...   or SWEEP A0 1.2 1.3 ...
+                    try:
+                        parts = line.replace(",", " ").split()
+                        # drop leading SWEEP + optional channel + optional count
+                        idx = 1
+                        if idx < len(parts) and parts[idx].upper().startswith("A"):
+                            idx += 1
+                        if idx < len(parts) and parts[idx].isdigit() and "." not in parts[idx]:
+                            idx += 1
+                        volts = [float(p) for p in parts[idx:] if p]
+                        if len(volts) >= max(4, n // 4):
+                            return volts[:n]
+                    except ValueError:
+                        continue
+            # Firmware without SWEEP: quick MEAS loop (still one lock)
+            volts: list[float] = []
+            for _ in range(n):
+                self._ser.reset_input_buffer()
+                self._ser.write(f"MEAS {ch}\n".encode("ascii"))
+                self._ser.flush()
+                got = None
+                for _ in range(3):
+                    line = self._readline()
+                    if not line:
+                        continue
+                    parts = line.replace(",", " ").split()
+                    upper = [p.upper() for p in parts]
+                    if "VOLTS" in upper:
+                        i = upper.index("VOLTS")
+                        try:
+                            got = float(parts[i + 2] if i + 2 < len(parts) else parts[i + 1])
+                            break
+                        except (ValueError, IndexError):
+                            continue
+                if got is None:
+                    raise RuntimeError(f"No SWEEP/VOLTS reply for {ch}")
+                volts.append(got)
+            return volts
 
 
 # Process-wide singleton used by the HTTP server

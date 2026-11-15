@@ -8,7 +8,7 @@
   <i aria-hidden="true">⌁</i>
   <div>
     <h1>Breadboard Odyssey</h1>
-    <p>Build the circuit, then Debug with an A0 oscilloscope probe</p>
+    <p>Build the circuit, then Debug with a professional A0 oscilloscope probe</p>
   </div>
   <nav class="journey-bar" aria-label="Modes">
     <button type="button" id="stage-build" class="active">Build</button>
@@ -20,7 +20,7 @@
     <section>
       <h2>Coach</h2>
       <div id="coach" class="coach" role="status"></div>
-      <p id="hwStatus" class="muted" style="margin-top:10px;font-size:12px" role="status">Checking Arduino / Gemini…</p>
+      <p id="hwStatus" class="hw-status muted" role="status">Checking Arduino / Gemini…</p>
       <div class="toolbar" style="margin-bottom:0">
         <button type="button" id="refreshHw">Refresh links</button>
         <button type="button" id="reconnectArduino">Reconnect Arduino</button>
@@ -41,13 +41,16 @@
       <small>Supports R, C, DC voltage sources and one named NE555 terminal profile (TIMER_DEMO — interface only).</small>
       <h2 style="margin-top:14px">Checklist</h2>
       <ul id="buildChecklist" class="stack"></ul>
-      <button type="button" id="toDebug" class="primary" disabled>Open Debug (A0 scope)</button>
+      <div class="toolbar" style="margin-bottom:0">
+        <button type="button" id="toDebug" class="primary" disabled>Open Debug (A0 scope)</button>
+        <button type="button" id="processFaultBuild" class="gemini" disabled title="Requires all suggested jumpers">Analyze signal with Gemini</button>
+      </div>
     </section>
 
     <section id="panel-debug" hidden>
       <h2>Debug · A0 scope</h2>
       <div class="stack">
-        <p class="muted">Yellow holes are the A0 probing points on the breadboard (default net: VCC). The scope plots live or mock samples from channel A0.</p>
+        <p class="muted">Yellow holes mark active probe points. Expand the scope for a larger view, then analyze the captured signal with Gemini.</p>
         <label>Channel
           <select id="scopeChannel" aria-label="Scope channel">
             <option value="A0" selected>A0 · VCC</option>
@@ -62,10 +65,20 @@
           <button type="button" id="scopeRun" class="primary">Run scope</button>
           <button type="button" id="scopeStop">Stop</button>
           <button type="button" id="scopeOnce">Single capture</button>
+          <button type="button" id="scopeExpand" aria-expanded="false">Expand scope</button>
         </div>
-        <div class="scope-wrap">
-          <canvas id="scopeCanvas" width="560" height="220" aria-label="A0 oscilloscope"></canvas>
-          <div id="scopeReadout" class="scope-readout muted">Idle</div>
+        <div class="scope-panel" id="scopePanel">
+          <div class="scope-panel-bar">
+            <strong>Oscilloscope</strong>
+            <button type="button" id="scopeCollapse" hidden>Collapse</button>
+          </div>
+          <div class="scope-wrap">
+            <canvas id="scopeCanvas" width="720" height="320" aria-label="A0 oscilloscope"></canvas>
+            <div id="scopeReadout" class="scope-readout muted">Idle</div>
+          </div>
+        </div>
+        <div class="toolbar">
+          <button type="button" id="processFault" class="gemini" title="Capture waveform and ask Gemini to diagnose">Analyze signal with Gemini</button>
         </div>
         <p id="probeHint" class="status" role="status"></p>
       </div>

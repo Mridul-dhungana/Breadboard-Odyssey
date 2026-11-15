@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
-def _load_dotenv(path: Path) -> None:
+def _load_dotenv(path: Path, *, override: bool = False) -> None:
     """Minimal .env loader so GEMINI_API_KEY / ARDUINO_PORT can live outside the shell."""
     if not path.is_file():
         return
@@ -29,7 +29,9 @@ def _load_dotenv(path: Path) -> None:
         key, _, val = line.partition("=")
         key = key.strip()
         val = val.strip().strip("'").strip('"')
-        if key and key not in os.environ:
+        if not key:
+            continue
+        if override or key not in os.environ:
             os.environ[key] = val
 
 
@@ -39,14 +41,15 @@ from arduino_bridge import bridge  # noqa: E402
 
 PORT = int(os.environ.get("PORT", "8765"))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-# gemini-2.0-flash was shut down (404). Prefer current Flash aliases.
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash").strip() or "gemini-3.6-flash"
+# Prefer widely available Flash models; keep newer aliases as optional overrides.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
 _gemini_candidates = [
     GEMINI_MODEL,
-    "gemini-3.6-flash",
-    "gemini-flash-latest",
     "gemini-2.5-flash",
+    "gemini-flash-latest",
+    "gemini-2.0-flash",
     "gemini-1.5-flash",
+    "gemini-3.6-flash",
 ]
 GEMINI_MODEL_FALLBACKS: list[str] = []
 for _m in _gemini_candidates:
@@ -54,6 +57,29 @@ for _m in _gemini_candidates:
         GEMINI_MODEL_FALLBACKS.append(_m)
 PREFER_ARDUINO = os.environ.get("PREFER_ARDUINO", "1").strip() not in ("0", "false", "False")
 ACTIVE_GEMINI_MODEL = GEMINI_MODEL
+LAST_GEMINI_ERROR: str | None = None
+
+
+def refresh_gemini_config() -> None:
+    """Reload .env so a newly added GEMINI_API_KEY is picked up without a full process restart."""
+    global GEMINI_API_KEY, GEMINI_MODEL, GEMINI_MODEL_FALLBACKS, ACTIVE_GEMINI_MODEL
+    _load_dotenv(ROOT / ".env", override=True)
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+    GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+    candidates = [
+        GEMINI_MODEL,
+        "gemini-2.5-flash",
+        "gemini-flash-latest",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-3.6-flash",
+    ]
+    GEMINI_MODEL_FALLBACKS = []
+    for model in candidates:
+        if model and model not in GEMINI_MODEL_FALLBACKS:
+            GEMINI_MODEL_FALLBACKS.append(model)
+    if ACTIVE_GEMINI_MODEL not in GEMINI_MODEL_FALLBACKS:
+        ACTIVE_GEMINI_MODEL = GEMINI_MODEL
 
 # TIMER_DEMO expected rails / nets (interface fixture — not SPICE).
 EXPECTED = {
@@ -188,10 +214,43 @@ def mock_diagnose(payload: dict) -> str:
         net = payload.get("net") or "VCC"
         return f"Scope {ch} on net {net}. Yellow holes are the probe points — run the scope to watch the waveform."
 
+    if stage == "process_fault":
+        scope = payload.get("scope") or {}
+        last = payload.get("lastReading") or (readings[-1] if readings else None)
+        fault = payload.get("fault") or "open_vcc"
+        stats = scope.get("stats") or {}
+        volts = scope.get("lastVolts")
+        if volts is None and last:
+            volts = last.get("volts")
+        ch = payload.get("channel") or "A0"
+        if stats:
+            volt_txt = (
+                f"{ch} avg {stats.get('avg')} V, pk-pk {stats.get('pkpk')} V "
+                f"(min {stats.get('min')}, max {stats.get('max')})"
+            )
+        elif volts is not None:
+            volt_txt = f"{float(volts):.2f} V on {ch}"
+        else:
+            volt_txt = "no scope capture yet"
+        return (
+            f"Mock signal analysis for fault '{fault}': {volt_txt}. "
+            "Check VCC and GND jumpers first, then OUT/TIMING. "
+            "Set GEMINI_API_KEY for a live Gemini analysis."
+        )
+
     return "Build the circuit, then open Debug for the A0 scope."
 
 
-def _gemini_generate(prompt: str, model: str) -> str | None:
+def _format_http_error(exc: urllib.error.HTTPError) -> str:
+    body = ""
+    try:
+        body = exc.read().decode("utf-8", errors="replace")[:400]
+    except Exception:  # noqa: BLE001
+        body = ""
+    return f"HTTP {exc.code} {exc.reason}" + (f": {body}" if body else "")
+
+
+def _gemini_generate(prompt: str, model: str, max_tokens: int = 260) -> str | None:
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
         f":generateContent?key={GEMINI_API_KEY}"
@@ -199,7 +258,7 @@ def _gemini_generate(prompt: str, model: str) -> str | None:
     body = json.dumps(
         {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.35, "maxOutputTokens": 260},
+            "generationConfig": {"temperature": 0.35, "maxOutputTokens": max_tokens},
         }
     ).encode("utf-8")
     req = urllib.request.Request(
@@ -208,7 +267,7 @@ def _gemini_generate(prompt: str, model: str) -> str | None:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     text = (
         data.get("candidates", [{}])[0]
@@ -219,36 +278,73 @@ def _gemini_generate(prompt: str, model: str) -> str | None:
     return (text or "").strip() or None
 
 
-def gemini_diagnose(payload: dict) -> tuple[str | None, str | None]:
-    """Returns (message, model_used). Tries current Flash models if one 404s."""
-    global ACTIVE_GEMINI_MODEL
+def gemini_diagnose(payload: dict) -> tuple[str | None, str | None, str | None]:
+    """Returns (message, model_used, error). Tries Flash model fallbacks if one 404s."""
+    global ACTIVE_GEMINI_MODEL, LAST_GEMINI_ERROR
+    refresh_gemini_config()
+    LAST_GEMINI_ERROR = None
     if not GEMINI_API_KEY:
-        return None, None
+        LAST_GEMINI_ERROR = "GEMINI_API_KEY not set"
+        return None, None, LAST_GEMINI_ERROR
     expected_block = {k: v for k, v in EXPECTED.items() if k != "GND"}
-    prompt = (
-        "You are an electronics lab coach for Breadboard Odyssey.\n"
-        "Circuit: 555 TIMER_DEMO on a solderless breadboard (wiring fixture — not a SPICE model).\n"
-        "Hardware: optional Arduino UNO Q measuring ADC channels mapped to nets.\n"
-        "Job: interpret the latest voltage reading vs expected rails and give ONE clear next action "
-        "(which net/hole to probe next, which jumper to fix, or verify). "
-        "If source is arduino, treat the volts as physical truth. "
-        "If source is mock, say so briefly. 1-3 short sentences. No markdown, no bullet lists.\n\n"
-        f"Expected rails (nom/tol):\n{json.dumps(expected_block, indent=2)}\n\n"
-        f"Session context:\n{json.dumps(payload, indent=2)}\n"
-    )
-    last_err: Exception | None = None
+    # Trim huge sample arrays so the prompt stays small/fast
+    ctx = dict(payload)
+    if isinstance(ctx.get("scope"), dict):
+        scope = dict(ctx["scope"])
+        samples = scope.get("samples") or []
+        if isinstance(samples, list) and len(samples) > 24:
+            scope["sampleCount"] = len(samples)
+            scope["samples"] = samples[:: max(1, len(samples) // 24)][:24]
+            ctx["scope"] = scope
+    stage = ctx.get("stage")
+    if stage == "process_fault":
+        prompt = (
+            "You are an electronics lab coach for Breadboard Odyssey.\n"
+            "Circuit: 555 TIMER_DEMO on a solderless breadboard (wiring fixture — not a SPICE model).\n"
+            "The student pressed Analyze signal with Gemini after capturing an oscilloscope sweep.\n"
+            "Analyze the waveform/signal stats vs expected rails and give a diagnosis:\n"
+            "(1) what the signal suggests (healthy rail, open supply, stuck output, oscillating, noise, etc.),\n"
+            "(2) most likely fault in one short sentence,\n"
+            "(3) 2-4 concrete next repair/probe steps (net/hole/jumper).\n"
+            "If scope source is arduino, treat volts as physical truth; if mock, say so briefly. "
+            "No markdown headings. Short plain sentences or a compact numbered list.\n\n"
+            f"Expected rails (nom/tol):\n{json.dumps(expected_block, indent=2)}\n\n"
+            f"Session context:\n{json.dumps(ctx, indent=2)}\n"
+        )
+        max_tokens = 480
+    else:
+        prompt = (
+            "You are an electronics lab coach for Breadboard Odyssey.\n"
+            "Circuit: 555 TIMER_DEMO on a solderless breadboard (wiring fixture — not a SPICE model).\n"
+            "Hardware: optional Arduino UNO Q measuring ADC channels mapped to nets.\n"
+            "Job: interpret the latest voltage reading vs expected rails and give ONE clear next action "
+            "(which net/hole to probe next, which jumper to fix, or verify). "
+            "If source is arduino, treat the volts as physical truth. "
+            "If source is mock, say so briefly. 1-3 short sentences. No markdown, no bullet lists.\n\n"
+            f"Expected rails (nom/tol):\n{json.dumps(expected_block, indent=2)}\n\n"
+            f"Session context:\n{json.dumps(ctx, indent=2)}\n"
+        )
+        max_tokens = 260
+    last_err: str | None = None
     for model in GEMINI_MODEL_FALLBACKS:
         try:
-            text = _gemini_generate(prompt, model)
+            text = _gemini_generate(prompt, model, max_tokens=max_tokens)
             if text:
                 ACTIVE_GEMINI_MODEL = model
-                return text, model
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError) as exc:
-            last_err = exc
+                LAST_GEMINI_ERROR = None
+                return text, model, None
+            last_err = f"{model}: empty response"
+        except urllib.error.HTTPError as exc:
+            last_err = f"{model}: {_format_http_error(exc)}"
+            print(f"[gemini] {last_err}")
             continue
-    if last_err:
-        print(f"[gemini] all models failed; last error: {last_err}")
-    return None, None
+        except (urllib.error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError) as exc:
+            last_err = f"{model}: {exc}"
+            print(f"[gemini] {last_err}")
+            continue
+    LAST_GEMINI_ERROR = last_err or "all Gemini models failed"
+    print(f"[gemini] all models failed; last error: {LAST_GEMINI_ERROR}")
+    return None, None, LAST_GEMINI_ERROR
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -281,6 +377,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path.split("?", 1)[0] == "/api/status":
+            refresh_gemini_config()
             if bridge.enabled:
                 bridge.connect()
             self._json(
@@ -290,6 +387,7 @@ class Handler(SimpleHTTPRequestHandler):
                         "configured": bool(GEMINI_API_KEY),
                         "model": ACTIVE_GEMINI_MODEL if GEMINI_API_KEY else None,
                         "fallbacks": GEMINI_MODEL_FALLBACKS if GEMINI_API_KEY else [],
+                        "lastError": LAST_GEMINI_ERROR,
                     },
                     "arduino": bridge.status(),
                     "preferArduino": PREFER_ARDUINO,
@@ -312,21 +410,29 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/diagnose":
             data = self._read_json()
+            refresh_gemini_config()
             # Enrich with live hardware status so Gemini knows what's real
             data["hardware"] = {
                 "arduino": bridge.status(),
                 "geminiConfigured": bool(GEMINI_API_KEY),
             }
-            gem, model = gemini_diagnose(data)
+            gem, model, err = gemini_diagnose(data)
             if gem:
                 self._json(200, {"message": gem, "source": "gemini", "model": model})
             else:
+                reason = "no_key" if not GEMINI_API_KEY else "gemini_error"
                 self._json(
                     200,
                     {
                         "message": mock_diagnose(data),
                         "source": "mock",
-                        "reason": "no_key" if not GEMINI_API_KEY else "gemini_error",
+                        "reason": reason,
+                        "error": err or LAST_GEMINI_ERROR,
+                        "detail": (
+                            "Add GEMINI_API_KEY to .env or Cursor environment secrets, then click Refresh links."
+                            if reason == "no_key"
+                            else (err or "Gemini API call failed")
+                        ),
                     },
                 )
             return
@@ -338,7 +444,7 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/api/scope":
             data = self._read_json()
             channel = str(data.get("channel", "A0")).upper()
-            count = max(8, min(int(data.get("samples", 64)), 200))
+            count = max(8, min(int(data.get("samples", 40)), 200))
             # Map channel → net using bridge defaults
             net = None
             for n, ch in bridge.net_map.items():
@@ -357,10 +463,9 @@ class Handler(SimpleHTTPRequestHandler):
                 try:
                     if not bridge.connect():
                         raise RuntimeError(bridge.last_error or "not connected")
-                    for _ in range(count):
-                        volts.append(round(float(bridge.read_voltage(net, channel)), 3))
+                    volts = [round(v, 3) for v in bridge.read_sweep(channel, count, net=net)]
                     source = "arduino"
-                    note = f"Live sweep from {bridge.port} {channel}"
+                    note = f"Live batch sweep from {bridge.port} {channel}"
                 except Exception as exc:  # noqa: BLE001
                     note = f"Arduino sweep failed ({exc}); mock waveform"
                     source = "mock"
