@@ -37,8 +37,21 @@ from arduino_bridge import bridge  # noqa: E402
 
 PORT = int(os.environ.get("PORT", "8765"))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+# gemini-2.0-flash was shut down (404). Prefer current Flash aliases.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash").strip() or "gemini-3.6-flash"
+_gemini_candidates = [
+    GEMINI_MODEL,
+    "gemini-3.6-flash",
+    "gemini-flash-latest",
+    "gemini-2.5-flash",
+    "gemini-1.5-flash",
+]
+GEMINI_MODEL_FALLBACKS: list[str] = []
+for _m in _gemini_candidates:
+    if _m and _m not in GEMINI_MODEL_FALLBACKS:
+        GEMINI_MODEL_FALLBACKS.append(_m)
 PREFER_ARDUINO = os.environ.get("PREFER_ARDUINO", "1").strip() not in ("0", "false", "False")
+ACTIVE_GEMINI_MODEL = GEMINI_MODEL
 
 # TIMER_DEMO expected rails / nets (interface fixture — not SPICE).
 EXPECTED = {
@@ -171,23 +184,9 @@ def mock_diagnose(payload: dict) -> str:
     return "Follow Build → Investigate → Repair → Verify."
 
 
-def gemini_diagnose(payload: dict) -> str | None:
-    if not GEMINI_API_KEY:
-        return None
-    expected_block = {k: v for k, v in EXPECTED.items() if k != "GND"}
-    prompt = (
-        "You are an electronics lab coach for Breadboard Odyssey.\n"
-        "Circuit: 555 TIMER_DEMO on a solderless breadboard (wiring fixture — not a SPICE model).\n"
-        "Hardware: optional Arduino UNO Q measuring ADC channels mapped to nets.\n"
-        "Job: interpret the latest voltage reading vs expected rails and give ONE clear next action "
-        "(which net/hole to probe next, which jumper to fix, or verify). "
-        "If source is arduino, treat the volts as physical truth. "
-        "If source is mock, say so briefly. 1-3 short sentences. No markdown, no bullet lists.\n\n"
-        f"Expected rails (nom/tol):\n{json.dumps(expected_block, indent=2)}\n\n"
-        f"Session context:\n{json.dumps(payload, indent=2)}\n"
-    )
+def _gemini_generate(prompt: str, model: str) -> str | None:
     url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}"
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
         f":generateContent?key={GEMINI_API_KEY}"
     )
     body = json.dumps(
@@ -202,18 +201,47 @@ def gemini_diagnose(payload: dict) -> str | None:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        text = (
-            data.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text")
-        )
-        return (text or "").strip() or None
-    except (urllib.error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError):
-        return None
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    text = (
+        data.get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [{}])[0]
+        .get("text")
+    )
+    return (text or "").strip() or None
+
+
+def gemini_diagnose(payload: dict) -> tuple[str | None, str | None]:
+    """Returns (message, model_used). Tries current Flash models if one 404s."""
+    global ACTIVE_GEMINI_MODEL
+    if not GEMINI_API_KEY:
+        return None, None
+    expected_block = {k: v for k, v in EXPECTED.items() if k != "GND"}
+    prompt = (
+        "You are an electronics lab coach for Breadboard Odyssey.\n"
+        "Circuit: 555 TIMER_DEMO on a solderless breadboard (wiring fixture — not a SPICE model).\n"
+        "Hardware: optional Arduino UNO Q measuring ADC channels mapped to nets.\n"
+        "Job: interpret the latest voltage reading vs expected rails and give ONE clear next action "
+        "(which net/hole to probe next, which jumper to fix, or verify). "
+        "If source is arduino, treat the volts as physical truth. "
+        "If source is mock, say so briefly. 1-3 short sentences. No markdown, no bullet lists.\n\n"
+        f"Expected rails (nom/tol):\n{json.dumps(expected_block, indent=2)}\n\n"
+        f"Session context:\n{json.dumps(payload, indent=2)}\n"
+    )
+    last_err: Exception | None = None
+    for model in GEMINI_MODEL_FALLBACKS:
+        try:
+            text = _gemini_generate(prompt, model)
+            if text:
+                ACTIVE_GEMINI_MODEL = model
+                return text, model
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError) as exc:
+            last_err = exc
+            continue
+    if last_err:
+        print(f"[gemini] all models failed; last error: {last_err}")
+    return None, None
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -253,7 +281,8 @@ class Handler(SimpleHTTPRequestHandler):
                 {
                     "gemini": {
                         "configured": bool(GEMINI_API_KEY),
-                        "model": GEMINI_MODEL if GEMINI_API_KEY else None,
+                        "model": ACTIVE_GEMINI_MODEL if GEMINI_API_KEY else None,
+                        "fallbacks": GEMINI_MODEL_FALLBACKS if GEMINI_API_KEY else [],
                     },
                     "arduino": bridge.status(),
                     "preferArduino": PREFER_ARDUINO,
@@ -281,9 +310,9 @@ class Handler(SimpleHTTPRequestHandler):
                 "arduino": bridge.status(),
                 "geminiConfigured": bool(GEMINI_API_KEY),
             }
-            gem = gemini_diagnose(data)
+            gem, model = gemini_diagnose(data)
             if gem:
-                self._json(200, {"message": gem, "source": "gemini", "model": GEMINI_MODEL})
+                self._json(200, {"message": gem, "source": "gemini", "model": model})
             else:
                 self._json(
                     200,
@@ -308,7 +337,11 @@ class Handler(SimpleHTTPRequestHandler):
 def main() -> None:
     os.chdir(ROOT)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    gem = "Gemini ON" if GEMINI_API_KEY else "Gemini off (export GEMINI_API_KEY)"
+    gem = (
+        f"Gemini ON (default {GEMINI_MODEL}; fallbacks {', '.join(GEMINI_MODEL_FALLBACKS)})"
+        if GEMINI_API_KEY
+        else "Gemini off (export GEMINI_API_KEY)"
+    )
     ard = f"Arduino {bridge.port}" if bridge.enabled else "Arduino off (export ARDUINO_PORT)"
     print(f"Breadboard Odyssey on http://127.0.0.1:{PORT}")
     print(f"  {gem}")
