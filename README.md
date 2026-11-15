@@ -9,10 +9,14 @@ Modes: **Build** the 555 (or divider), then **Debug** with an **A0 oscilloscope*
 ## Quick start
 
 ```bash
+git checkout main && git pull
 pip install -r requirements.txt   # pyserial for Arduino
+# stop any old server first, then:
 python3 python/server.py
-# open http://127.0.0.1:8765
+# open http://127.0.0.1:8765  (hard-refresh if the UI looks stale: Ctrl+Shift+R / Cmd+Shift+R)
 ```
+
+After a pull, always restart `python/server.py` from the repo root. The server sends `Cache-Control: no-store` for HTML/CSS/JS and cache-busts asset URLs so the black UI + Analyze button load.
 
 ### Plug in Gemini + Arduino (recommended)
 

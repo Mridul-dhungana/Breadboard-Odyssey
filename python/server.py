@@ -347,16 +347,57 @@ def gemini_diagnose(payload: dict) -> tuple[str | None, str | None, str | None]:
     return None, None, LAST_GEMINI_ERROR
 
 
+def _asset_version(*rel_paths: str) -> str:
+    """Fingerprint static UI files so browsers reload after git pull."""
+    latest = 0
+    for rel in rel_paths:
+        try:
+            latest = max(latest, int((ROOT / rel).stat().st_mtime))
+        except OSError:
+            continue
+    return str(latest or int(time.time()))
+
+
+ASSET_VERSION = _asset_version(
+    "index.html",
+    "css/app.css",
+    "js/app.js",
+    "js/board.js",
+    "js/diagnose.js",
+    "js/scope.js",
+)
+
+
 class Handler(SimpleHTTPRequestHandler):
+    extensions_map = {
+        **getattr(SimpleHTTPRequestHandler, "extensions_map", {}),
+        ".js": "application/javascript",
+        ".css": "text/css",
+        ".html": "text/html",
+        "": "application/octet-stream",
+    }
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
+
+    def end_headers(self) -> None:
+        # Local demos: never let the browser keep stale CSS/JS after a git pull.
+        path = self.path.split("?", 1)[0].lower()
+        if (
+            path in ("/", "/index.html")
+            or path.endswith((".html", ".css", ".js", ".map"))
+        ):
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        super().end_headers()
 
     def _json(self, code: int, obj: dict) -> None:
         raw = json.dumps(obj).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(raw)
 
@@ -368,15 +409,48 @@ class Handler(SimpleHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
+    def _serve_index(self) -> None:
+        """Inject cache-busting query params so pulled CSS/JS always reload."""
+        html_path = ROOT / "index.html"
+        try:
+            html = html_path.read_text(encoding="utf-8")
+        except OSError:
+            self.send_error(404, "index.html missing")
+            return
+        ver = _asset_version(
+            "index.html",
+            "css/app.css",
+            "js/app.js",
+            "js/board.js",
+            "js/diagnose.js",
+            "js/scope.js",
+        )
+        html = (
+            html.replace('href="css/app.css"', f'href="css/app.css?v={ver}"')
+            .replace('src="js/board.js"', f'src="js/board.js?v={ver}"')
+            .replace('src="js/diagnose.js"', f'src="js/diagnose.js?v={ver}"')
+            .replace('src="js/scope.js"', f'src="js/scope.js?v={ver}"')
+            .replace('src="js/app.js"', f'src="js/app.js?v={ver}"')
+        )
+        raw = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path.split("?", 1)[0] == "/api/status":
+        path = self.path.split("?", 1)[0]
+        if path in ("/", "/index.html"):
+            self._serve_index()
+            return
+        if path == "/api/status":
             refresh_gemini_config()
             if bridge.enabled:
                 bridge.connect()
@@ -392,6 +466,18 @@ class Handler(SimpleHTTPRequestHandler):
                     "arduino": bridge.status(),
                     "preferArduino": PREFER_ARDUINO,
                     "expected": EXPECTED,
+                    "ui": {
+                        "root": str(ROOT),
+                        "assetVersion": _asset_version(
+                            "index.html",
+                            "css/app.css",
+                            "js/app.js",
+                            "js/board.js",
+                            "js/diagnose.js",
+                            "js/scope.js",
+                        ),
+                        "theme": "oled-black",
+                    },
                 },
             )
             return
@@ -517,6 +603,8 @@ def main() -> None:
     print(f"  {gem}")
     print(f"  {ard}")
     print(f"Serving {ROOT}")
+    print(f"  UI assetVersion={_asset_version('css/app.css', 'js/app.js', 'index.html')} theme=oled-black")
+    print("  If the page looks stale after git pull: restart this server, then hard-refresh the browser.")
     if bridge.enabled:
         bridge.connect()
         print(f"  Arduino status: {bridge.status()}")
